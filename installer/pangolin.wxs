@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Pangolin" 
+           Language="1033" 
+           Version="1.0.0" 
+           Manufacturer="Fossorial" 
+           UpgradeCode="165F13D3-9A2F-4AF7-9C68-474A8256B274"
+           Compressed="yes">
+    
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Define the directory structure using StandardDirectory for WiX v4 -->
+    <!-- Use ProgramFiles64Folder to ensure 64-bit Program Files directory -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Pangolin">
+        <Component Id="PangolinExe" Guid="4FE37947-1773-42EB-8BDE-6B46CE0E8ECC">
+          <File Id="PangolinExe" 
+                Source="$(var.BuildDir)/Pangolin.exe" 
+                KeyPath="yes" />
+        </Component>
+        <!-- Icons in the same directory as the executable -->
+        <Directory Id="IconsFolder" Name="icons">
+          <Component Id="IconOrange" Guid="DBF8097D-9CBE-434A-AC8D-E1A3CF62022C">
+            <File Id="IconOrange" 
+                  Source="$(var.ProjectDir)/icons/icon-orange.ico" 
+                  KeyPath="yes" />
+          </Component>
+          <Component Id="IconGray" Guid="BFA27572-3602-469B-A8B3-90B5C0AA833E">
+            <File Id="IconGray" 
+                  Source="$(var.ProjectDir)/icons/icon-gray.ico" 
+                  KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- Feature required by WiX - all components must be referenced by a feature -->
+    <Feature Id="ProductFeature" Title="Pangolin" Level="1">
+      <ComponentRef Id="PangolinExe" />
+      <ComponentRef Id="IconOrange" />
+      <ComponentRef Id="IconGray" />
+    </Feature>
+
+    <!-- UI Configuration - removed for WiX v4 compatibility -->
+    <!-- Note: UI extensions may need to be configured differently in WiX v4 -->
+    
+    <!-- Icon for the installer -->
+    <Icon Id="ProductIcon" SourceFile="$(var.ProjectDir)/icons/icon-orange.ico" />
+    <Property Id="ARPPRODUCTICON" Value="ProductIcon" />
+  </Package>
+</Wix>
+

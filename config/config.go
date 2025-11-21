@@ -24,5 +24,5 @@ func GetLogDir() string {
 
 // GetIconsPath returns the directory path for icon files
 func GetIconsPath() string {
-	return filepath.Join(GetProgramDataDir(), "icons")
+	return filepath.Join("icons")
 }
