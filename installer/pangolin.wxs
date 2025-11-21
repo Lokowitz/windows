@@ -35,11 +35,50 @@
       </Directory>
     </StandardDirectory>
 
+    <!-- Desktop shortcut -->
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="A1B2C3D4-E5F6-4A5B-8C9D-0E1F2A3B4C5D">
+        <Shortcut Id="DesktopShortcut"
+                  Name="Pangolin"
+                  Description="Pangolin Application"
+                  Target="[INSTALLFOLDER]Pangolin.exe"
+                  Icon="ProductIcon" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\Fossorial\Pangolin"
+                       Name="DesktopShortcut"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <!-- Start Menu shortcut -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ProgramMenuDir" Name="Pangolin">
+        <Component Id="StartMenuShortcut" Guid="B2C3D4E5-F6A7-5B6C-9D0E-1F2A3B4C5D6E">
+          <Shortcut Id="StartMenuShortcut"
+                    Name="Pangolin"
+                    Description="Pangolin Application"
+                    Target="[INSTALLFOLDER]Pangolin.exe"
+                    Icon="ProductIcon" />
+          <RemoveFolder Id="ProgramMenuDir" On="uninstall" />
+          <RegistryValue Root="HKCU"
+                         Key="Software\Fossorial\Pangolin"
+                         Name="StartMenuShortcut"
+                         Type="integer"
+                         Value="1"
+                         KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
     <!-- Feature required by WiX - all components must be referenced by a feature -->
     <Feature Id="ProductFeature" Title="Pangolin" Level="1">
       <ComponentRef Id="PangolinExe" />
       <ComponentRef Id="IconOrange" />
       <ComponentRef Id="IconGray" />
+      <ComponentRef Id="DesktopShortcut" />
+      <ComponentRef Id="StartMenuShortcut" />
     </Feature>
 
     <!-- UI Configuration - removed for WiX v4 compatibility -->
