@@ -10,6 +10,7 @@ require (
 
 require (
 	github.com/dblohm7/wingoes v0.0.0-20231019175336-f6e33aa7cc34 // indirect
+	golang.org/x/crypto v0.45.0 // indirect
 	golang.org/x/exp v0.0.0-20251113190631-e25ba8c21ef6 // indirect
 	golang.org/x/sys v0.38.0 // indirect
 	gopkg.in/Knetic/govaluate.v3 v3.0.0 // indirect

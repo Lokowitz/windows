@@ -66,3 +66,12 @@ $RECYCLE.BIN/
 # Debug files
 *.debug
 *-debug.exe
+
+# Signing keys (never commit these!)
+signing-keys/
+release.sec
+release.pub
+*.sec
+*.pub
+
+update-server/

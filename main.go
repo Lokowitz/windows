@@ -4,6 +4,7 @@ package main
 
 import (
 	"github.com/fosrl/windows/ui"
+	"github.com/fosrl/windows/version"
 
 	"github.com/fosrl/newt/logger"
 	"github.com/tailscale/walk"
@@ -12,6 +13,9 @@ import (
 func main() {
 	// Setup logging first
 	setupLogging()
+
+	// Log version on startup
+	logger.Info("Pangolin version %s starting", version.Number)
 
 	app, err := walk.InitApp()
 	if err != nil {

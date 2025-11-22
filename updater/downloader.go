@@ -1,0 +1,318 @@
+//go:build windows
+
+package updater
+
+import (
+	"crypto/hmac"
+	"errors"
+	"fmt"
+	"hash"
+	"io"
+	"os"
+	"sync/atomic"
+
+	"golang.org/x/crypto/blake2b"
+	"golang.org/x/sys/windows"
+
+	"github.com/fosrl/newt/logger"
+	"github.com/fosrl/windows/elevate"
+	"github.com/fosrl/windows/updater/winhttp"
+	"github.com/fosrl/windows/version"
+)
+
+type DownloadProgress struct {
+	Activity        string
+	BytesDownloaded uint64
+	BytesTotal      uint64
+	Error           error
+	Complete        bool
+}
+
+type progressHashWatcher struct {
+	dp        *DownloadProgress
+	c         chan DownloadProgress
+	hashState hash.Hash
+}
+
+func (pm *progressHashWatcher) Write(p []byte) (int, error) {
+	bytes := len(p)
+	pm.dp.BytesDownloaded += uint64(bytes)
+	pm.c <- *pm.dp
+	pm.hashState.Write(p)
+	return bytes, nil
+}
+
+type UpdateFound struct {
+	name string
+	hash [blake2b.Size256]byte
+}
+
+// Name returns the filename of the update MSI
+func (u *UpdateFound) Name() string {
+	return u.name
+}
+
+func CheckForUpdate() (updateFound *UpdateFound, err error) {
+	logger.Info("Updater: CheckForUpdate() called")
+	updateFound, _, _, err = checkForUpdate(false)
+	if err != nil {
+		logger.Error("Updater: CheckForUpdate failed: %v", err)
+	} else if updateFound == nil {
+		logger.Info("Updater: CheckForUpdate completed - no update found")
+	} else {
+		logger.Info("Updater: CheckForUpdate completed - update found: %s", updateFound.name)
+	}
+	return
+}
+
+func checkForUpdate(keepSession bool) (*UpdateFound, *winhttp.Session, *winhttp.Connection, error) {
+	logger.Info("Updater: checkForUpdate() started (keepSession=%v)", keepSession)
+	logger.Info("Updater: Current version: %s, Architecture: %s", version.Number, version.Arch())
+
+	// Allow bypassing official version check for development/testing
+	// Set PANGOLIN_ALLOW_DEV_UPDATES=1 to enable updates on unsigned builds
+	isOfficial := version.IsRunningOfficialVersion()
+	logger.Info("Updater: IsRunningOfficialVersion: %v", isOfficial)
+	if !isOfficial {
+		devMode := os.Getenv("PANGOLIN_ALLOW_DEV_UPDATES") == "1"
+		logger.Info("Updater: PANGOLIN_ALLOW_DEV_UPDATES: %v", devMode)
+		if !devMode {
+			err := errors.New("Build is not official, so updates are disabled")
+			logger.Error("Updater: %v", err)
+			return nil, nil, nil, err
+		}
+		logger.Info("Updater: Development mode enabled - allowing updates on unsigned build")
+	}
+
+	logger.Info("Updater: Creating WinHTTP session with User-Agent: %s", version.UserAgent())
+	session, err := winhttp.NewSession(version.UserAgent())
+	if err != nil {
+		logger.Error("Updater: Failed to create WinHTTP session: %v", err)
+		return nil, nil, nil, err
+	}
+	logger.Info("Updater: WinHTTP session created successfully")
+	defer func() {
+		if err != nil || !keepSession {
+			logger.Info("Updater: Closing WinHTTP session")
+			session.Close()
+		}
+	}()
+
+	logger.Info("Updater: Connecting to update server: %s:%d (HTTPS=%v)", updateServerHost, updateServerPort, updateServerUseHttps)
+	connection, err := session.Connect(updateServerHost, updateServerPort, updateServerUseHttps)
+	if err != nil {
+		logger.Error("Updater: Failed to connect to update server: %v", err)
+		return nil, nil, nil, err
+	}
+	logger.Info("Updater: Connected to update server successfully")
+	defer func() {
+		if err != nil || !keepSession {
+			logger.Info("Updater: Closing connection")
+			connection.Close()
+		}
+	}()
+
+	logger.Info("Updater: Fetching manifest from: %s", latestVersionPath)
+	response, err := connection.Get(latestVersionPath, true)
+	if err != nil {
+		logger.Error("Updater: Failed to fetch manifest: %v", err)
+		return nil, nil, nil, err
+	}
+	defer response.Close()
+	logger.Info("Updater: Manifest response received")
+
+	var fileList [1024 * 512] /* 512 KiB */ byte
+	bytesRead, err := response.Read(fileList[:])
+	if err != nil && (err != io.EOF || bytesRead == 0) {
+		logger.Error("Updater: Failed to read manifest data: %v (bytesRead=%d)", err, bytesRead)
+		return nil, nil, nil, err
+	}
+	logger.Info("Updater: Read %d bytes from manifest", bytesRead)
+
+	logger.Info("Updater: Parsing manifest file list")
+	files, err := readFileList(fileList[:bytesRead])
+	if err != nil {
+		logger.Error("Updater: Failed to parse manifest: %v", err)
+		return nil, nil, nil, err
+	}
+	logger.Info("Updater: Manifest parsed successfully, found %d files", len(files))
+
+	logger.Info("Updater: Searching for update candidate")
+	updateFound, err := findCandidate(files)
+	if err != nil {
+		logger.Error("Updater: Error finding candidate: %v", err)
+		return nil, nil, nil, err
+	}
+	if updateFound == nil {
+		logger.Info("Updater: No update candidate found")
+	} else {
+		logger.Info("Updater: Update candidate found: %s", updateFound.name)
+	}
+
+	if keepSession {
+		logger.Info("Updater: Keeping session and connection open")
+		return updateFound, session, connection, nil
+	}
+	return updateFound, nil, nil, nil
+}
+
+var updateInProgress = uint32(0)
+
+func DownloadVerifyAndExecute(userToken uintptr) (progress chan DownloadProgress) {
+	progress = make(chan DownloadProgress, 128)
+	progress <- DownloadProgress{Activity: "Initializing"}
+
+	if !atomic.CompareAndSwapUint32(&updateInProgress, 0, 1) {
+		progress <- DownloadProgress{Error: errors.New("An update is already in progress")}
+		return
+	}
+
+	doIt := func() {
+		defer atomic.StoreUint32(&updateInProgress, 0)
+		logger.Info("Updater: DownloadVerifyAndExecute started (userToken=%v)", userToken != 0)
+
+		progress <- DownloadProgress{Activity: "Checking for update"}
+		logger.Info("Updater: Checking for update...")
+		update, session, connection, err := checkForUpdate(true)
+		if err != nil {
+			logger.Error("Updater: Update check failed: %v", err)
+			progress <- DownloadProgress{Error: err}
+			return
+		}
+		defer connection.Close()
+		defer session.Close()
+		if update == nil {
+			logger.Error("Updater: No update was found")
+			progress <- DownloadProgress{Error: errors.New("No update was found")}
+			return
+		}
+		logger.Info("Updater: Update found: %s", update.name)
+
+		progress <- DownloadProgress{Activity: "Creating temporary file"}
+		logger.Info("Updater: Creating temporary file for MSI")
+		file, err := msiTempFile()
+		if err != nil {
+			logger.Error("Updater: Failed to create temporary file: %v", err)
+			progress <- DownloadProgress{Error: err}
+			return
+		}
+		logger.Info("Updater: Temporary file created: %s", file.Name())
+		progress <- DownloadProgress{Activity: fmt.Sprintf("Msi destination is %#q", file.Name())}
+		defer func() {
+			if file != nil {
+				logger.Info("Updater: Cleaning up temporary file: %s", file.Name())
+				file.Delete()
+			}
+		}()
+
+		downloadPath := fmt.Sprintf(msiPath, update.name)
+		logger.Info("Updater: Downloading MSI from: %s", downloadPath)
+		dp := DownloadProgress{Activity: "Downloading update"}
+		progress <- dp
+		response, err := connection.Get(downloadPath, false)
+		if err != nil {
+			logger.Error("Updater: Failed to download MSI: %v", err)
+			progress <- DownloadProgress{Error: err}
+			return
+		}
+		defer response.Close()
+		logger.Info("Updater: MSI download response received")
+
+		length, err := response.Length()
+		if err == nil && length >= 0 {
+			logger.Info("Updater: MSI file size: %d bytes", length)
+			dp.BytesTotal = length
+			progress <- dp
+		} else {
+			logger.Warn("Updater: Could not determine MSI file size: %v", err)
+		}
+
+		logger.Info("Updater: Initializing BLAKE2b-256 hasher for verification")
+		hasher, err := blake2b.New256(nil)
+		if err != nil {
+			logger.Error("Updater: Failed to create hasher: %v", err)
+			progress <- DownloadProgress{Error: err}
+			return
+		}
+		pm := &progressHashWatcher{&dp, progress, hasher}
+		logger.Info("Updater: Starting download (max 100 MiB)")
+		bytesWritten, err := io.Copy(file, io.TeeReader(io.LimitReader(response, 1024*1024*100 /* 100 MiB */), pm))
+		if err != nil {
+			logger.Error("Updater: Download failed: %v (bytes written: %d)", err, bytesWritten)
+			progress <- DownloadProgress{Error: err}
+			return
+		}
+		logger.Info("Updater: Download completed: %d bytes written", bytesWritten)
+
+		calculatedHash := hasher.Sum(nil)
+		logger.Info("Updater: Verifying hash - calculated: %x, expected: %x", calculatedHash, update.hash)
+		if !hmac.Equal(calculatedHash, update.hash[:]) {
+			logger.Error("Updater: Hash verification failed!")
+			progress <- DownloadProgress{Error: errors.New("The downloaded update has the wrong hash")}
+			return
+		}
+		logger.Info("Updater: Hash verification passed")
+
+		// Skip authenticode verification in development mode
+		devMode := os.Getenv("PANGOLIN_ALLOW_DEV_UPDATES") == "1"
+		if !devMode {
+			logger.Info("Updater: Verifying Authenticode signature")
+			progress <- DownloadProgress{Activity: "Verifying authenticode signature"}
+			if !verifyAuthenticode(file.ExclusivePath()) {
+				logger.Error("Updater: Authenticode verification failed")
+				progress <- DownloadProgress{Error: errors.New("The downloaded update does not have an authentic authenticode signature")}
+				return
+			}
+			logger.Info("Updater: Authenticode verification passed")
+		} else {
+			logger.Info("Updater: Skipping Authenticode verification (dev mode)")
+		}
+
+		logger.Info("Updater: Starting MSI installation")
+		progress <- DownloadProgress{Activity: "Installing update"}
+		err = runMsi(file, userToken)
+		if err != nil {
+			logger.Error("Updater: MSI installation failed: %v", err)
+			progress <- DownloadProgress{Error: err}
+			return
+		}
+		logger.Info("Updater: MSI installation completed successfully")
+
+		logger.Info("Updater: Update process complete")
+		progress <- DownloadProgress{Complete: true}
+	}
+	if userToken == 0 {
+		logger.Info("Updater: No user token provided, attempting to run as SYSTEM")
+
+		// Check if we have admin privileges before attempting elevation
+		var processToken windows.Token
+		err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY, &processToken)
+		if err == nil {
+			isElevated := processToken.IsElevated()
+			processToken.Close()
+			if !isElevated {
+				logger.Error("Updater: Process is not running with admin privileges")
+				progress <- DownloadProgress{Error: errors.New("update requires administrator privileges. Please run the application as administrator")}
+				return progress
+			}
+			logger.Info("Updater: Process is running with admin privileges")
+		}
+
+		go func() {
+			err := elevate.DoAsSystem(func() error {
+				logger.Info("Updater: Successfully elevated to SYSTEM, starting update process")
+				doIt()
+				return nil
+			})
+			if err != nil {
+				logger.Error("Updater: Failed to elevate to SYSTEM: %v", err)
+				progress <- DownloadProgress{Error: fmt.Errorf("failed to elevate privileges: %w. Make sure the application is running as administrator", err)}
+			}
+		}()
+	} else {
+		logger.Info("Updater: Using provided user token: %v", userToken)
+		go doIt()
+	}
+
+	return progress
+}
