@@ -31,11 +31,11 @@ func ShowLoginDialog(parent walk.Form) {
 			RadioButtonGroup{
 				DataMember: "Option",
 				Buttons: []RadioButton{
-					RadioButton{
+					{
 						AssignTo: &cloudRB,
 						Text:     "Pangolin Cloud",
 					},
-					RadioButton{
+					{
 						AssignTo: &selfHostedRB,
 						Text:     "Self-hosted or dedicated instance",
 					},

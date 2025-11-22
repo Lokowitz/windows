@@ -3,7 +3,7 @@
 package main
 
 import (
-	"windows/ui"
+	"github.com/fosrl/windows/ui"
 
 	"github.com/fosrl/newt/logger"
 	"github.com/tailscale/walk"

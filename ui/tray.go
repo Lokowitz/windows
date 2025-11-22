@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"unsafe"
 
-	"windows/config"
+	"github.com/fosrl/windows/config"
 
 	"github.com/fosrl/newt/logger"
 	"github.com/tailscale/walk"

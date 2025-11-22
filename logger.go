@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"windows/config"
+	"github.com/fosrl/windows/config"
 
 	"github.com/fosrl/newt/logger"
 )

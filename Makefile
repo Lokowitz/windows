@@ -9,7 +9,7 @@ GOOS=windows
 GOARCH=amd64
 
 # Default target
-all: clean build
+all: clean rsrc build
 
 # Build the Windows executable (GUI mode - no console)
 build: rsrc

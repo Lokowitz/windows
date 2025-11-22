@@ -9,8 +9,8 @@
 
 ## Building the Application
 
-`make rsrc` - Generates Windows resources (icons, version info)
-`make build` - Builds the Windows executable `Pangolin.exe` in the `build/` directory
+- `make rsrc` - Generates Windows resources (icons, version info)
+- `make build` - Builds the Windows executable `Pangolin.exe` in the `build/` directory
 
 ## Building the MSI Installer
 

@@ -1,4 +1,4 @@
-module windows
+module github.com/fosrl/windows
 
 go 1.25
 
