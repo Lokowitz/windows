@@ -4,16 +4,19 @@ package ui
 
 import (
 	"fmt"
-	"os"
+	"math/rand"
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/fosrl/windows/api"
 	"github.com/fosrl/windows/auth"
 	"github.com/fosrl/windows/config"
 	"github.com/fosrl/windows/managers"
+	"github.com/fosrl/windows/secrets"
+	"github.com/fosrl/windows/tunnel"
 	"github.com/fosrl/windows/updater"
 	"github.com/fosrl/windows/version"
 
@@ -23,30 +26,41 @@ import (
 )
 
 var (
-	trayIcon            *walk.NotifyIcon
-	contextMenu         *walk.Menu
-	mainWindow          *walk.MainWindow
-	hasUpdate           bool
-	updateMutex         sync.RWMutex
-	updateAction        *walk.Action // Action for "Update Available" menu item
-	labelAction         *walk.Action
-	loginAction         *walk.Action
-	connectAction       *walk.Action
-	moreAction          *walk.Action
-	quitAction          *walk.Action
-	updateFoundCb       *managers.UpdateFoundCallback
-	updateProgressCb    *managers.UpdateProgressCallback
-	managerStoppingCb   *managers.ManagerStoppingCallback
-	tunnelStateChangeCb *managers.TunnelStateChangeCallback
-	isConnected         bool
-	connectMutex        sync.RWMutex
-	authManager         *auth.AuthManager
-	configManager       *config.ConfigManager
-	apiClient           *api.APIClient
+	trayIcon           *walk.NotifyIcon
+	contextMenu        *walk.Menu
+	mainWindow         *walk.MainWindow
+	hasUpdate          bool
+	updateMutex        sync.RWMutex
+	updateAction       *walk.Action
+	loadingAction      *walk.Action
+	statusAction       *walk.Action
+	connectAction      *walk.Action
+	userEmailAction    *walk.Action
+	orgsMenuAction     *walk.Action
+	loginAction        *walk.Action
+	logoutAction       *walk.Action
+	moreAction         *walk.Action
+	quitAction         *walk.Action
+	updateFoundCb      *managers.UpdateFoundCallback
+	updateProgressCb   *managers.UpdateProgressCallback
+	managerStoppingCb  *managers.ManagerStoppingCallback
+	isConnected        bool
+	connectMutex       sync.RWMutex
+	isLoggedOut        bool
+	loggedOutMutex     sync.RWMutex
+	currentTunnelState managers.TunnelState
+	tunnelStateMutex   sync.RWMutex
+	authManager        *auth.AuthManager
+	configManager      *config.ConfigManager
+	apiClient          *api.APIClient
+	tunnelManager      *tunnel.Manager
+	orgMenu            *walk.Menu
+	moreMenu           *walk.Menu
+	orgActions         map[string]*walk.Action
+	noOrgsAction       *walk.Action
+	menuUpdateMutex    sync.Mutex
 )
 
-// setTrayIcon updates the tray icon based on connection status
-// connected: true for orange icon, false for gray icon
 func setTrayIcon(connected bool) {
 	if trayIcon == nil {
 		return
@@ -78,112 +92,349 @@ func setTrayIcon(connected bool) {
 	}
 }
 
-func SetupTray(mw *walk.MainWindow, am *auth.AuthManager, cm *config.ConfigManager, ac *api.APIClient) error {
-	// Store references for update menu management
-	mainWindow = mw
-	authManager = am
-	configManager = cm
-	apiClient = ac
-
-	// Create NotifyIcon
-	ni, err := walk.NewNotifyIcon()
-	if err != nil {
-		return err
+// openURL opens a URL in the default browser
+func openURL(url string) {
+	cmd := exec.Command("cmd", "/c", "start", url)
+	if err := cmd.Run(); err != nil {
+		logger.Error("Failed to open URL: %v", err)
 	}
-	trayIcon = ni // Store reference for icon updates
+}
 
-	// Load default gray icon (disconnected state)
-	setTrayIcon(false)
+// getTunnelStatusDisplayText returns the display text for tunnel status
+func getTunnelStatusDisplayText(state tunnel.State) string {
+	switch state {
+	case tunnel.StateRunning:
+		return "Connected"
+	case tunnel.StateStarting:
+		return "Connecting..."
+	case tunnel.StateStopping:
+		return "Disconnecting..."
+	case tunnel.StateStopped:
+		return "Disconnected"
+	default:
+		return "Unknown"
+	}
+}
 
-	// Set tooltip
-	ni.SetToolTip(config.AppName)
+// handleMenuOpen verifies session and refreshes organizations when menu opens
+func handleMenuOpen() {
+	if authManager == nil || apiClient == nil {
+		return
+	}
 
-	// Create grayed out label action
-	labelAction = walk.NewAction()
-	labelAction.SetText("milo@pangolin.net")
-	labelAction.SetEnabled(false) // Gray out the text
+	// Only handle if authenticated
+	if !authManager.IsAuthenticated() {
+		return
+	}
 
-	// Create Login action
-	loginAction = walk.NewAction()
-	loginAction.SetText("Login")
-	loginAction.Triggered().Attach(func() {
-		ShowLoginDialog(mw, authManager, configManager, apiClient)
-	})
+	// Run in background goroutine to avoid blocking menu
+	go func() {
+		// First, try to get the user to verify session is still valid
+		user, err := apiClient.GetUser()
+		if err != nil {
+			// If getting user fails, mark as logged out
+			loggedOutMutex.Lock()
+			isLoggedOut = true
+			loggedOutMutex.Unlock()
+			// Update menu to reflect logged out state
+			updateMenu()
+			return
+		}
 
-	// Create Connect action (toggle button with checkmark)
+		// If successful, update user and clear logged out state
+		authManager.UpdateCurrentUser(user)
+		loggedOutMutex.Lock()
+		isLoggedOut = false
+		loggedOutMutex.Unlock()
+
+		// Update menu to reflect updated state
+		updateMenu()
+
+		// Refresh organizations in background
+		if authManager.IsAuthenticated() {
+			if err := authManager.RefreshOrganizations(); err != nil {
+				logger.Error("Failed to refresh organizations: %v", err)
+			} else {
+				// Update menu again after orgs refresh
+				updateMenu()
+			}
+		}
+	}()
+}
+
+// setupMenu creates the menu structure once
+func setupMenu() error {
+	if contextMenu == nil {
+		return fmt.Errorf("context menu not initialized")
+	}
+
+	actions := contextMenu.Actions()
+
+	// Create loading action
+	loadingAction = walk.NewAction()
+	loadingAction.SetText("Loading...")
+	loadingAction.SetEnabled(false)
+	actions.Add(loadingAction)
+
+	// Create status action
+	statusAction = walk.NewAction()
+	statusAction.SetText("Disconnected")
+	statusAction.SetEnabled(false)
+	statusAction.SetVisible(false) // Hidden initially
+	actions.Add(statusAction)
+
+	// Create connect action
 	connectAction = walk.NewAction()
 	connectAction.SetText("Connect")
-	connectAction.SetChecked(false) // Initially unchecked
+	connectAction.SetVisible(false) // Hidden initially
 	connectAction.Triggered().Attach(func() {
 		go func() {
-			connectMutex.RLock()
-			currentState := isConnected
-			connectMutex.RUnlock()
+			if tunnelManager == nil {
+				logger.Error("Tunnel manager not initialized")
+				// Show error dialog to user
+				walk.App().Synchronize(func() {
+					td := walk.NewTaskDialog()
+					_, _ = td.Show(walk.TaskDialogOpts{
+						Owner:         mainWindow,
+						Title:         "Connection Error",
+						Content:       "Tunnel manager is not initialized. Please restart the application.",
+						IconSystem:    walk.TaskDialogSystemIconError,
+						CommonButtons: win.TDCBF_OK_BUTTON,
+					})
+				})
+				return
+			}
 
-			if currentState {
+			if tunnelManager.IsConnected() {
 				// Disconnect
 				logger.Info("Disconnecting...")
-				err := managers.IPCClientStopTunnel()
+				err := tunnelManager.Disconnect()
 				if err != nil {
 					logger.Error("Failed to stop tunnel: %v", err)
+					// Show error dialog to user
 					walk.App().Synchronize(func() {
-						connectAction.SetChecked(true) // Revert on error
+						var title, message string
+
+						// Check if it's a ConnectionError with formatted title/message
+						if connErr, ok := err.(*tunnel.ConnectionError); ok {
+							title = connErr.Title
+							message = connErr.Message
+						} else {
+							// Fallback to generic error
+							title = "Disconnect Failed"
+							message = err.Error()
+						}
+
+						td := walk.NewTaskDialog()
+						_, _ = td.Show(walk.TaskDialogOpts{
+							Owner:         mainWindow,
+							Title:         title,
+							Content:       message,
+							IconSystem:    walk.TaskDialogSystemIconError,
+							CommonButtons: win.TDCBF_OK_BUTTON,
+						})
 					})
 				}
 			} else {
-				// Connect - create typed config struct
-				config := managers.TunnelConfig{
-					Name:      "pangolin-tunnel",
-					Endpoint:  "example.pangolin.net:51820",
-					DNS:       "8.8.8.8,1.1.1.1",
-					Address:   "10.0.0.2/24",
-					UserToken: "abc123",
-				}
-				logger.Info("Connecting with config: Name=%s, Endpoint=%s", config.Name, config.Endpoint)
-				err := managers.IPCClientStartTunnel(config)
+				// Connect
+				err := tunnelManager.Connect()
 				if err != nil {
 					logger.Error("Failed to start tunnel: %v", err)
+					// Show error dialog to user
 					walk.App().Synchronize(func() {
-						connectAction.SetChecked(false) // Revert on error
+						var title, message string
+
+						// Check if it's a ConnectionError with formatted title/message
+						if connErr, ok := err.(*tunnel.ConnectionError); ok {
+							title = connErr.Title
+							message = connErr.Message
+						} else {
+							// Fallback to generic error
+							title = "Connection Failed"
+							message = err.Error()
+						}
+
+						td := walk.NewTaskDialog()
+						_, _ = td.Show(walk.TaskDialogOpts{
+							Owner:         mainWindow,
+							Title:         title,
+							Content:       message,
+							IconSystem:    walk.TaskDialogSystemIconError,
+							CommonButtons: win.TDCBF_OK_BUTTON,
+						})
 					})
 				}
 			}
 		}()
 	})
+	actions.Add(connectAction)
 
-	// Create More submenu with Documentation and Open Logs
-	moreMenu, err := walk.NewMenu()
+	// Create user email action
+	userEmailAction = walk.NewAction()
+	userEmailAction.SetEnabled(false)
+	userEmailAction.SetVisible(false) // Hidden initially
+	actions.Add(userEmailAction)
+
+	// Create organizations menu
+	var err error
+	orgMenu, err = walk.NewMenu()
 	if err != nil {
+		logger.Error("Failed to create org menu: %v", err)
 		return err
 	}
+	orgsMenuAction = walk.NewMenuAction(orgMenu)
+	orgsMenuAction.SetText("Organizations")
+	orgsMenuAction.SetVisible(false) // Hidden initially
+	actions.Add(orgsMenuAction)
+
+	// Separator before login
+	actions.Add(walk.NewSeparatorAction())
+
+	// Create login action
+	loginAction = walk.NewAction()
+	loginAction.SetText("Log in to account")
+	loginAction.Triggered().Attach(func() {
+		isAuthenticated := authManager != nil && authManager.IsAuthenticated()
+		loggedOutMutex.RLock()
+		isLoggedOutLocal := isLoggedOut
+		loggedOutMutex.RUnlock()
+
+		if isAuthenticated && !isLoggedOutLocal {
+			// Log in to different account - logout first, then open login window
+			go func() {
+				walk.App().Synchronize(func() {
+					ShowLoginDialog(mainWindow, authManager, configManager, apiClient, tunnelManager)
+					// Update menu after dialog closes (login may have succeeded)
+					time.Sleep(100 * time.Millisecond) // Small delay to let auth state update
+					updateMenu()
+				})
+			}()
+		} else {
+			// Log back in or log in to account - just open login window
+			ShowLoginDialog(mainWindow, authManager, configManager, apiClient, tunnelManager)
+			// Update menu after dialog closes (login may have succeeded)
+			time.Sleep(100 * time.Millisecond) // Small delay to let auth state update
+			updateMenu()
+		}
+	})
+	actions.Add(loginAction)
+
+	// Create update action (initially hidden)
+	updateAction = walk.NewAction()
+	updateAction.SetText("Update available")
+	updateAction.SetVisible(false) // Hidden initially
+	updateAction.Triggered().Attach(func() {
+		go triggerUpdate(mainWindow)
+	})
+	actions.Add(updateAction)
+
+	// Separator before More
+	actions.Add(walk.NewSeparatorAction())
+
+	// Create More submenu
+	moreMenu, err = walk.NewMenu()
+	if err != nil {
+		logger.Error("Failed to create more menu: %v", err)
+		return err
+	}
+
+	// Create logout action
+	logoutAction = walk.NewAction()
+	logoutAction.SetText("Logout")
+	logoutAction.SetVisible(false) // Hidden initially
+	logoutAction.Triggered().Attach(func() {
+		go func() {
+			// Stop tunnel before logout
+			if tunnelManager != nil && tunnelManager.IsConnected() {
+				logger.Info("Stopping tunnel before logout")
+				if err := tunnelManager.Disconnect(); err != nil {
+					logger.Error("Failed to stop tunnel before logout: %v", err)
+					// Show error dialog to user
+					walk.App().Synchronize(func() {
+						td := walk.NewTaskDialog()
+						_, _ = td.Show(walk.TaskDialogOpts{
+							Owner:         mainWindow,
+							Title:         "Disconnect Failed",
+							Content:       fmt.Sprintf("Failed to disconnect tunnel: %v", err),
+							IconSystem:    walk.TaskDialogSystemIconError,
+							CommonButtons: win.TDCBF_OK_BUTTON,
+						})
+					})
+				}
+			}
+
+			if err := authManager.Logout(); err != nil {
+				logger.Error("Failed to logout: %v", err)
+				// Show error dialog to user
+				walk.App().Synchronize(func() {
+					td := walk.NewTaskDialog()
+					_, _ = td.Show(walk.TaskDialogOpts{
+						Owner:         mainWindow,
+						Title:         "Logout Failed",
+						Content:       fmt.Sprintf("Failed to logout: %v", err),
+						IconSystem:    walk.TaskDialogSystemIconError,
+						CommonButtons: win.TDCBF_OK_BUTTON,
+					})
+				})
+			}
+			updateMenu()
+		}()
+	})
+	moreMenu.Actions().Add(logoutAction)
+	moreMenu.Actions().Add(walk.NewSeparatorAction())
+
+	// Support section
+	supportLabel := walk.NewAction()
+	supportLabel.SetText("Support")
+	supportLabel.SetEnabled(false)
+	moreMenu.Actions().Add(supportLabel)
+
+	howItWorksAction := walk.NewAction()
+	howItWorksAction.SetText("How Pangolin Works")
+	howItWorksAction.Triggered().Attach(func() {
+		openURL("https://docs.pangolin.net/")
+	})
+	moreMenu.Actions().Add(howItWorksAction)
+
 	docAction := walk.NewAction()
 	docAction.SetText("Documentation")
 	docAction.Triggered().Attach(func() {
-		url := "https://github.com/tailscale/walk"
-		cmd := exec.Command("cmd", "/c", "start", url)
-		if err := cmd.Run(); err != nil {
-			logger.Error("Failed to open documentation: %v", err)
-		}
+		openURL("https://docs.pangolin.net/")
 	})
 	moreMenu.Actions().Add(docAction)
 
-	openLogsAction := walk.NewAction()
-	openLogsAction.SetText("Open Logs Location")
-	openLogsAction.Triggered().Attach(func() {
-		logDir := config.GetLogDir()
-		// Ensure the directory exists
-		if err := os.MkdirAll(logDir, 0755); err != nil {
-			logger.Error("Failed to create log directory: %v", err)
-		}
-		// Open the directory in Windows Explorer
-		cmd := exec.Command("explorer", logDir)
-		if err := cmd.Run(); err != nil {
-			logger.Error("Failed to open log directory: %v", err)
-		}
-	})
-	moreMenu.Actions().Add(openLogsAction)
+	moreMenu.Actions().Add(walk.NewSeparatorAction())
 
-	// Create Check for Updates action
+	// Copyright
+	copyrightText := fmt.Sprintf("© %d Fossorial, Inc.", time.Now().Year())
+	copyrightAction := walk.NewAction()
+	copyrightAction.SetText(copyrightText)
+	copyrightAction.SetEnabled(false)
+	moreMenu.Actions().Add(copyrightAction)
+
+	termsAction := walk.NewAction()
+	termsAction.SetText("Terms of Service")
+	termsAction.Triggered().Attach(func() {
+		openURL("https://pangolin.net/terms-of-service.html")
+	})
+	moreMenu.Actions().Add(termsAction)
+
+	privacyAction := walk.NewAction()
+	privacyAction.SetText("Privacy Policy")
+	privacyAction.Triggered().Attach(func() {
+		openURL("https://pangolin.net/privacy-policy.html")
+	})
+	moreMenu.Actions().Add(privacyAction)
+
+	moreMenu.Actions().Add(walk.NewSeparatorAction())
+
+	// Version information
+	versionAction := walk.NewAction()
+	versionAction.SetText(fmt.Sprintf("Version: %s", version.Number))
+	versionAction.SetEnabled(false)
+	moreMenu.Actions().Add(versionAction)
+
+	// Check for Updates action
 	checkUpdateAction := walk.NewAction()
 	checkUpdateAction.SetText("Check for Updates")
 	checkUpdateAction.Triggered().Attach(func() {
@@ -198,7 +449,7 @@ func SetupTray(mw *walk.MainWindow, am *auth.AuthManager, cm *config.ConfigManag
 				walk.App().Synchronize(func() {
 					td := walk.NewTaskDialog()
 					_, _ = td.Show(walk.TaskDialogOpts{
-						Owner:         mw,
+						Owner:         mainWindow,
 						Title:         "Update Check Failed",
 						Content:       fmt.Sprintf("Failed to check for updates: %v", err),
 						IconSystem:    walk.TaskDialogSystemIconError,
@@ -212,12 +463,12 @@ func SetupTray(mw *walk.MainWindow, am *auth.AuthManager, cm *config.ConfigManag
 			case managers.UpdateStateFoundUpdate:
 				logger.Info("Update available")
 				// Trigger the update
-				triggerUpdate(mw)
+				triggerUpdate(mainWindow)
 			case managers.UpdateStateUpdatesDisabledUnofficialBuild:
 				walk.App().Synchronize(func() {
 					td := walk.NewTaskDialog()
 					_, _ = td.Show(walk.TaskDialogOpts{
-						Owner:         mw,
+						Owner:         mainWindow,
 						Title:         "Updates Disabled",
 						Content:       "Updates are disabled for unofficial builds.",
 						IconSystem:    walk.TaskDialogSystemIconInformation,
@@ -229,7 +480,7 @@ func SetupTray(mw *walk.MainWindow, am *auth.AuthManager, cm *config.ConfigManag
 				walk.App().Synchronize(func() {
 					td := walk.NewTaskDialog()
 					_, _ = td.Show(walk.TaskDialogOpts{
-						Owner:         mw,
+						Owner:         mainWindow,
 						Title:         "No Update Available",
 						Content:       "You are running the latest version.",
 						IconSystem:    walk.TaskDialogSystemIconInformation,
@@ -241,51 +492,444 @@ func SetupTray(mw *walk.MainWindow, am *auth.AuthManager, cm *config.ConfigManag
 	})
 	moreMenu.Actions().Add(checkUpdateAction)
 
-	// Add version info at the bottom, grayed out
-	versionAction := walk.NewAction()
-	versionAction.SetText(fmt.Sprintf("Version %s", version.Number))
-	versionAction.SetEnabled(false) // Gray out the text
-	moreMenu.Actions().Add(versionAction)
-
 	moreAction = walk.NewMenuAction(moreMenu)
 	moreAction.SetText("More")
+	actions.Add(moreAction)
 
-	// Create Quit action
+	// Separator before Quit
+	actions.Add(walk.NewSeparatorAction())
+
+	// Create quit action
 	quitAction = walk.NewAction()
 	quitAction.SetText("Quit")
 	quitAction.Triggered().Attach(func() {
 		// Try to quit the manager service (stops tunnels and quits manager)
-		// This only works if we're connected via IPC
-		// Wait for the quit request to complete before exiting to prevent
-		// the manager from restarting this process before it processes the quit
 		go func() {
 			alreadyQuit, err := managers.IPCClientQuit(true) // true = stop tunnels on quit
 			if err != nil {
 				logger.Error("Failed to quit manager service: %v", err)
+				// Show error dialog to user
+				walk.App().Synchronize(func() {
+					td := walk.NewTaskDialog()
+					_, _ = td.Show(walk.TaskDialogOpts{
+						Owner:         mainWindow,
+						Title:         "Quit Failed",
+						Content:       fmt.Sprintf("Failed to quit manager service: %v", err),
+						IconSystem:    walk.TaskDialogSystemIconError,
+						CommonButtons: win.TDCBF_OK_BUTTON,
+					})
+					// Still try to exit even if quit failed
+					walk.App().Exit(0)
+				})
+				return
 			} else if alreadyQuit {
 				logger.Info("Manager service already quitting")
 			} else {
 				logger.Info("Manager service quit requested")
 			}
 			// Exit the UI after the quit request has been sent and acknowledged
-			// This prevents the manager from restarting the process before it processes the quit
 			walk.App().Synchronize(func() {
 				walk.App().Exit(0)
 			})
 		}()
 	})
+	actions.Add(quitAction)
 
-	// Initialize context menu and add all initial actions
+	// Initialize org actions map
+	orgActions = make(map[string]*walk.Action)
+
+	// Initial update to set correct visibility and text
+	updateMenu()
+
+	return nil
+}
+
+// updateMenu updates all menu items based on current state
+func updateMenu() {
+	if contextMenu == nil {
+		return
+	}
+
+	app := walk.App()
+	if app == nil {
+		return
+	}
+
+	menuUpdateMutex.Lock()
+	defer menuUpdateMutex.Unlock()
+
+	app.Synchronize(func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error("Panic in updateMenu: %v", r)
+			}
+		}()
+
+		// Check auth state
+		isInitializing := authManager != nil && authManager.IsInitializing()
+		isAuthenticated := authManager != nil && authManager.IsAuthenticated()
+		loggedOutMutex.RLock()
+		isLoggedOutLocal := isLoggedOut
+		loggedOutMutex.RUnlock()
+
+		// Check if user info exists locally (from current user or config)
+		hasLocalUserInfo := false
+		if authManager != nil {
+			user := authManager.CurrentUser()
+			if user != nil && user.Email != "" {
+				hasLocalUserInfo = true
+			}
+		}
+		if !hasLocalUserInfo && configManager != nil {
+			cfg := configManager.GetConfig()
+			if cfg != nil && cfg.Email != nil && *cfg.Email != "" {
+				hasLocalUserInfo = true
+			}
+		}
+
+		// Update loading state
+		if loadingAction != nil {
+			loadingAction.SetVisible(isInitializing)
+		}
+
+		// Update authenticated section visibility
+		// Show full auth section if: authenticated and not logged out
+		showAuthSection := isAuthenticated && !isLoggedOutLocal && !isInitializing
+		// Show user email if: full auth section OR (logged out but has local user info)
+		showUserEmail := showAuthSection || (isLoggedOutLocal && hasLocalUserInfo && !isInitializing)
+
+		if statusAction != nil {
+			statusAction.SetVisible(showAuthSection)
+		}
+		if connectAction != nil {
+			connectAction.SetVisible(showAuthSection)
+		}
+		if userEmailAction != nil {
+			userEmailAction.SetVisible(showUserEmail)
+		}
+		if orgsMenuAction != nil {
+			orgsMenuAction.SetVisible(showAuthSection)
+		}
+
+		// Update tunnel state and organizations only when fully authenticated
+		if showAuthSection {
+			updateTunnelState()
+			updateOrganizations()
+		}
+		// Update user email when authenticated or logged out with local user info
+		if showUserEmail {
+			updateUserEmail()
+		}
+
+		// Update login action
+		updateLoginAction()
+
+		// Update update action visibility
+		updateMutex.RLock()
+		hasUpdateLocal := hasUpdate
+		updateMutex.RUnlock()
+		if updateAction != nil {
+			updateAction.SetVisible(hasUpdateLocal)
+		}
+
+		// Update More submenu
+		updateMoreMenu()
+	})
+}
+
+// updateTunnelState updates the tunnel status and connect button
+func updateTunnelState() {
+	if statusAction == nil || connectAction == nil {
+		return
+	}
+
+	var state tunnel.State
+	if tunnelManager != nil {
+		state = tunnelManager.State()
+	} else {
+		tunnelStateMutex.RLock()
+		state = tunnel.State(currentTunnelState)
+		tunnelStateMutex.RUnlock()
+	}
+
+	statusAction.SetText(getTunnelStatusDisplayText(state))
+
+	var connected bool
+	if tunnelManager != nil {
+		connected = tunnelManager.IsConnected()
+	} else {
+		connectMutex.RLock()
+		connected = isConnected
+		connectMutex.RUnlock()
+	}
+
+	connectText := "Connect"
+	if connected {
+		connectText = "Disconnect"
+	} else if state == tunnel.StateStarting {
+		connectText = "Connecting..."
+	} else if state == tunnel.StateStopping {
+		connectText = "Disconnecting..."
+	}
+	connectAction.SetText(connectText)
+	connectAction.SetChecked(connected)
+}
+
+// updateUserEmail updates the user email display
+func updateUserEmail() {
+	if userEmailAction == nil || authManager == nil {
+		return
+	}
+
+	loggedOutMutex.RLock()
+	isLoggedOutLocal := isLoggedOut
+	loggedOutMutex.RUnlock()
+
+	user := authManager.CurrentUser()
+	emailText := ""
+	if user != nil && user.Email != "" {
+		emailText = user.Email
+		// Append "(Logged out)" if logged out
+		if isLoggedOutLocal {
+			emailText += " (Logged out)"
+		}
+	} else if cfg := configManager.GetConfig(); cfg != nil && cfg.Email != nil {
+		emailText = *cfg.Email + " (Logged out)"
+	}
+	userEmailAction.SetText(emailText)
+	userEmailAction.SetVisible(emailText != "")
+}
+
+// updateOrganizations updates the organizations menu
+func updateOrganizations() {
+	if orgMenu == nil || orgsMenuAction == nil || authManager == nil {
+		return
+	}
+
+	orgs := authManager.Organizations()
+	currentOrg := authManager.CurrentOrg()
+	currentOrgId := ""
+	if currentOrg != nil {
+		currentOrgId = currentOrg.Id
+	}
+
+	// Get tunnel state to determine if org buttons should be disabled
+	var state tunnel.State
+	if tunnelManager != nil {
+		state = tunnelManager.State()
+	} else {
+		tunnelStateMutex.RLock()
+		state = tunnel.State(currentTunnelState)
+		tunnelStateMutex.RUnlock()
+	}
+	shouldDisable := state == tunnel.StateStarting || state == tunnel.StateStopping
+
+	// Ensure org count label and separator exist
+	actions := orgMenu.Actions()
+	hasCountLabel := false
+	hasSeparator := false
+	if actions.Len() > 0 {
+		firstAction := actions.At(0)
+		if firstAction.Text() != "" && !firstAction.Enabled() {
+			hasCountLabel = true
+		}
+	}
+	if actions.Len() > 1 {
+		secondAction := actions.At(1)
+		if secondAction.Text() == "" {
+			hasSeparator = true
+		}
+	}
+
+	var orgCountAction *walk.Action
+	if !hasCountLabel {
+		orgCountAction = walk.NewAction()
+		orgCountAction.SetEnabled(false)
+		actions.Insert(0, orgCountAction)
+	} else {
+		orgCountAction = actions.At(0)
+	}
+
+	if !hasSeparator {
+		separator := walk.NewSeparatorAction()
+		actions.Insert(1, separator)
+	}
+
+	// Update org count label
+	orgCountText := fmt.Sprintf("%d Organization", len(orgs))
+	if len(orgs) != 1 {
+		orgCountText += "s"
+	}
+	orgCountAction.SetText(orgCountText)
+	orgCountAction.SetVisible(true) // Always show count, even when 0
+
+	// Create set of current org IDs
+	orgSet := make(map[string]bool)
+	for _, org := range orgs {
+		orgSet[org.Id] = true
+	}
+
+	// Remove orgs that no longer exist (skip count label at 0 and separator at 1)
+	for orgId, action := range orgActions {
+		if !orgSet[orgId] {
+			actions.Remove(action)
+			delete(orgActions, orgId)
+		}
+	}
+
+	// Handle "No organizations" message when there are no orgs
+	if len(orgs) == 0 {
+		// Add "No organizations" action if it doesn't exist
+		if noOrgsAction == nil {
+			noOrgsAction = walk.NewAction()
+			noOrgsAction.SetText("No organizations")
+			noOrgsAction.SetEnabled(false)
+			// Insert after separator (index 2: count label at 0, separator at 1)
+			actions.Insert(2, noOrgsAction)
+		}
+		noOrgsAction.SetVisible(true)
+	} else {
+		// Remove "No organizations" action if it exists
+		if noOrgsAction != nil {
+			actions.Remove(noOrgsAction)
+			noOrgsAction = nil
+		}
+	}
+
+	// Update or add orgs
+	for _, org := range orgs {
+		action, exists := orgActions[org.Id]
+		if !exists {
+			// Create new action
+			action = walk.NewAction()
+			action.SetText(org.Name)
+			action.SetCheckable(true)
+			orgCopy := org // Capture for closure
+			action.Triggered().Attach(func() {
+				go func() {
+					if err := authManager.SelectOrganization(&orgCopy); err != nil {
+						logger.Error("Failed to select organization: %v", err)
+						// Show error dialog to user
+						walk.App().Synchronize(func() {
+							td := walk.NewTaskDialog()
+							_, _ = td.Show(walk.TaskDialogOpts{
+								Owner:         mainWindow,
+								Title:         "Organization Selection Failed",
+								Content:       fmt.Sprintf("Failed to select organization: %v", err),
+								IconSystem:    walk.TaskDialogSystemIconError,
+								CommonButtons: win.TDCBF_OK_BUTTON,
+							})
+						})
+					} else {
+						updateMenu()
+					}
+				}()
+			})
+			orgActions[org.Id] = action
+
+			// Insert after separator (index 2: count label at 0, separator at 1)
+			actions.Insert(2, action)
+		} else {
+			// Update existing action
+			action.SetText(org.Name)
+		}
+
+		// Update checked state
+		action.SetChecked(currentOrgId != "" && org.Id == currentOrgId)
+		action.SetEnabled(!shouldDisable)
+	}
+
+	// Update orgs menu action text
+	currentOrgName := "Organizations"
+	if currentOrg != nil {
+		currentOrgName = currentOrg.Name
+	}
+	orgsMenuAction.SetText(currentOrgName)
+	// Always show menu when authenticated (visibility controlled by updateMenu based on auth state)
+}
+
+// updateLoginAction updates the login button text and enabled state
+func updateLoginAction() {
+	if loginAction == nil || authManager == nil {
+		return
+	}
+
+	isAuthenticated := authManager.IsAuthenticated()
+	loggedOutMutex.RLock()
+	isLoggedOutLocal := isLoggedOut
+	loggedOutMutex.RUnlock()
+
+	cfg := configManager.GetConfig()
+	hasSavedUserInfo := cfg != nil && cfg.Email != nil
+
+	if isAuthenticated {
+		if isLoggedOutLocal {
+			loginAction.SetText("Log back in")
+		} else {
+			loginAction.SetText("Log in to different account")
+		}
+	} else if hasSavedUserInfo {
+		loginAction.SetText("Log back in")
+	} else {
+		loginAction.SetText("Log in to account")
+	}
+}
+
+// updateMoreMenu updates the More submenu
+func updateMoreMenu() {
+	if moreMenu == nil || logoutAction == nil || authManager == nil {
+		return
+	}
+
+	isAuthenticated := authManager.IsAuthenticated()
+	loggedOutMutex.RLock()
+	isLoggedOutLocal := isLoggedOut
+	loggedOutMutex.RUnlock()
+
+	// Update logout visibility
+	logoutVisible := isAuthenticated && !isLoggedOutLocal
+	logoutAction.SetVisible(logoutVisible)
+}
+
+func SetupTray(mw *walk.MainWindow, am *auth.AuthManager, cm *config.ConfigManager, ac *api.APIClient, sm *secrets.SecretManager) error {
+	// Store references for update menu management
+	mainWindow = mw
+	authManager = am
+	configManager = cm
+	apiClient = ac
+
+	// Initialize tunnel manager with IPC adapter
+	ipcAdapter := managers.NewIPCAdapter()
+	tunnelManager = tunnel.NewManager(am, cm, sm, ipcAdapter)
+
+	// Create NotifyIcon
+	ni, err := walk.NewNotifyIcon()
+	if err != nil {
+		return err
+	}
+	trayIcon = ni // Store reference for icon updates
+
+	// Load default gray icon (disconnected state)
+	setTrayIcon(false)
+
+	// Set tooltip
+	ni.SetToolTip(config.AppName)
+
+	// Initialize context menu
 	contextMenu = ni.ContextMenu()
-	contextMenu.Actions().Add(labelAction) // Add label first (grayed out)
-	contextMenu.Actions().Add(loginAction) // Add Login button
-	contextMenu.Actions().Add(connectAction)
-	contextMenu.Actions().Add(moreAction)
-	contextMenu.Actions().Add(quitAction)
+
+	// Setup menu structure once
+	if err := setupMenu(); err != nil {
+		logger.Error("Failed to setup menu: %v", err)
+		return err
+	}
 
 	// Handle left-click to show popup menu using Windows API
 	ni.MouseDown().Attach(func(x, y int, button walk.MouseButton) {
 		if button == walk.LeftButton {
+			// Handle menu open - verify session and refresh orgs
+			handleMenuOpen()
+
 			// Get cursor position
 			var pt win.POINT
 			win.GetCursorPos(&pt)
@@ -297,9 +941,11 @@ func SetupTray(mw *walk.MainWindow, am *auth.AuthManager, cm *config.ConfigManag
 			})(unsafe.Pointer(contextMenu))
 
 			if menuPtr.hMenu != 0 {
+				// Update menu before showing (in case state changed)
+				updateMenu()
+
 				// Show the menu using TrackPopupMenu
 				// TrackPopupMenu automatically closes when clicking away
-				// We need to set the window as foreground to ensure proper message handling
 				win.SetForegroundWindow(mw.Handle())
 				win.TrackPopupMenu(
 					menuPtr.hMenu,
@@ -325,12 +971,12 @@ func SetupTray(mw *walk.MainWindow, am *auth.AuthManager, cm *config.ConfigManag
 			updateMutex.Lock()
 			hasUpdate = true
 			updateMutex.Unlock()
-			updateMenuWithAvailableUpdate()
+			updateMenu()
 		} else {
 			updateMutex.Lock()
 			hasUpdate = false
 			updateMutex.Unlock()
-			updateMenuWithAvailableUpdate()
+			updateMenu()
 		}
 	})
 
@@ -383,7 +1029,7 @@ func SetupTray(mw *walk.MainWindow, am *auth.AuthManager, cm *config.ConfigManag
 			updateMutex.Lock()
 			hasUpdate = false
 			updateMutex.Unlock()
-			updateMenuWithAvailableUpdate()
+			updateMenu()
 			// The MSI installer will handle the restart
 		}
 	})
@@ -395,36 +1041,103 @@ func SetupTray(mw *walk.MainWindow, am *auth.AuthManager, cm *config.ConfigManag
 			updateMutex.Lock()
 			hasUpdate = true
 			updateMutex.Unlock()
-			updateMenuWithAvailableUpdate()
+			updateMenu()
 		}
 	}()
 
-	// Register for tunnel state change notifications
-	tunnelStateChangeCb = managers.IPCClientRegisterTunnelStateChange(func(state managers.TunnelState) {
+	// Register for tunnel state change notifications via tunnel manager
+	tunnelManager.RegisterStateChangeCallback(func(state tunnel.State) {
 		logger.Info("Tunnel state changed: %s", state.String())
+		tunnelStateMutex.Lock()
+		currentTunnelState = managers.TunnelState(state)
+		tunnelStateMutex.Unlock()
+
 		walk.App().Synchronize(func() {
 			switch state {
-			case managers.TunnelStateRunning:
+			case tunnel.StateRunning:
 				connectMutex.Lock()
 				isConnected = true
 				connectMutex.Unlock()
-				connectAction.SetChecked(true)
 				setTrayIcon(true)
-				connectAction.SetText("Disconnect")
-			case managers.TunnelStateStopped:
+			case tunnel.StateStopped:
 				connectMutex.Lock()
 				isConnected = false
 				connectMutex.Unlock()
-				connectAction.SetChecked(false)
 				setTrayIcon(false)
-				connectAction.SetText("Connect")
-			case managers.TunnelStateStarting:
-				connectAction.SetText("Connecting...")
-			case managers.TunnelStateStopping:
-				connectAction.SetText("Disconnecting...")
 			}
+			// Update menu to update status text and connect button
+			updateMenu()
 		})
 	})
+
+	// Monitor auth state changes to rebuild menu
+	go func() {
+		// Initial state
+		lastAuthState := authManager != nil && authManager.IsAuthenticated()
+		lastInitializing := authManager != nil && authManager.IsInitializing()
+
+		for {
+			time.Sleep(500 * time.Millisecond)
+			if authManager == nil {
+				continue
+			}
+
+			currentAuthState := authManager.IsAuthenticated()
+			currentInitializing := authManager.IsInitializing()
+
+			if currentAuthState != lastAuthState || currentInitializing != lastInitializing {
+				lastAuthState = currentAuthState
+				lastInitializing = currentInitializing
+				updateMenu()
+			}
+		}
+	}()
+
+	// Background refresh loop
+	go func() {
+		// Initial delay before first refresh (with jitter)
+		initialJitter := time.Duration(rand.Intn(7000)) * time.Millisecond
+		time.Sleep(initialJitter)
+
+		for {
+			if authManager == nil {
+				time.Sleep(180 * time.Second)
+				continue
+			}
+
+			// Only refresh if authenticated
+			if authManager.IsAuthenticated() {
+				// Get OLM ID
+				olmId, found := authManager.GetOlmId()
+				if found && olmId != "" {
+					// Refresh from MyDevice
+					err := authManager.RefreshFromMyDevice(olmId)
+					if err != nil {
+						logger.Error("Failed to refresh from MyDevice: %v", err)
+					} else {
+						// Update menu to reflect updated orgs
+						updateMenu()
+					}
+				}
+			}
+
+			// Check if unauthenticated after refresh (refresh might result in logout)
+			if !authManager.IsAuthenticated() {
+				// If unauthenticated, stop tunnel
+				if tunnelManager != nil && tunnelManager.IsConnected() {
+					logger.Info("User is unauthenticated, stopping tunnel")
+					if err := tunnelManager.Disconnect(); err != nil {
+						logger.Error("Failed to stop tunnel after authentication loss: %v", err)
+					}
+				}
+			}
+
+			baseInterval := 180 * time.Second
+			jitterRange := 15 * time.Second
+			jitter := time.Duration(rand.Intn(int(2*jitterRange))) - jitterRange
+			time.Sleep(baseInterval + jitter)
+		}
+	}()
 
 	return nil
 }
@@ -484,93 +1197,4 @@ func triggerUpdate(mw *walk.MainWindow) {
 			})
 		})
 	}
-}
-
-// updateMenuWithAvailableUpdate adds or removes the "Update Available" menu item
-// based on whether an update is available. Uses Insert/Remove like WireGuard does.
-func updateMenuWithAvailableUpdate() {
-	if contextMenu == nil {
-		return
-	}
-
-	// Safely get the app instance - it might not be ready yet
-	app := walk.App()
-	if app == nil {
-		logger.Error("Cannot update menu: walk.App() is nil (app not initialized)")
-		return
-	}
-
-	updateMutex.RLock()
-	hasUpdateLocal := hasUpdate
-	updateMutex.RUnlock()
-
-	// Use defer/recover to catch any panics from Synchronize
-	defer func() {
-		if r := recover(); r != nil {
-			logger.Error("Panic in updateMenuWithAvailableUpdate: %v", r)
-		}
-	}()
-
-	app.Synchronize(func() {
-		// Recover from any panics that occur on the UI thread
-		defer func() {
-			if r := recover(); r != nil {
-				logger.Error("Panic in Synchronize callback (UI thread): %v", r)
-			}
-		}()
-
-		actions := contextMenu.Actions()
-
-		// Check if update action is already in the menu
-		updateActionInMenu := false
-		if updateAction != nil {
-			for i := 0; i < actions.Len(); i++ {
-				if actions.At(i) == updateAction {
-					updateActionInMenu = true
-					break
-				}
-			}
-		}
-
-		if hasUpdateLocal {
-			// Create update menu item if it doesn't exist
-			if updateAction == nil {
-				updateAction = walk.NewAction()
-				updateAction.SetText("Update available")
-				updateAction.Triggered().Attach(func() {
-					// Run in goroutine to avoid blocking the menu action handler
-					go triggerUpdate(mainWindow)
-				})
-			} else {
-				// Update the text if action already exists (keep it simple)
-				updateAction.SetText("Update available")
-			}
-
-			// Insert update action if it's not already in the menu
-			// Insert after connectAction (before moreAction)
-			if !updateActionInMenu {
-				// Find the index of moreAction to insert before it
-				moreActionIndex := -1
-				for i := 0; i < actions.Len(); i++ {
-					if actions.At(i) == moreAction {
-						moreActionIndex = i
-						break
-					}
-				}
-				if moreActionIndex >= 0 {
-					actions.Insert(moreActionIndex, updateAction)
-				} else {
-					// Fallback: just add it
-					actions.Add(updateAction)
-				}
-			}
-		} else {
-			// Remove update action if it exists in the menu
-			if updateActionInMenu && updateAction != nil {
-				actions.Remove(updateAction)
-			}
-			// Note: We don't set updateAction to nil here because we want to keep
-			// the action object for potential reuse, just remove it from the menu
-		}
-	})
 }

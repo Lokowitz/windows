@@ -4,13 +4,15 @@ package tunnel
 
 import (
 	"github.com/fosrl/newt/logger"
+
+	olmpkg "github.com/fosrl/olm/olm"
 )
 
 // destroyTunnel performs cleanup and tears down the tunnel
-// This should be called before the service stops to ensure clean shutdown
 func destroyTunnel(config Config) {
-	// TODO: Implement actual tunnel destruction logic
-	logger.Info("Tunnel: Destroying tunnel for %s", config.Name)
-	// print config
-	logger.Info("Tunnel: Config: %+v", config)
+	logger.Debug("Destroy tunnel called")
+
+	olmpkg.StopTunnel()
+
+	logger.Debug("Destroy tunnel completed successfully")
 }

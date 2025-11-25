@@ -63,11 +63,18 @@ func (s State) String() string {
 
 // Config represents the tunnel configuration
 type Config struct {
-	Name      string `json:"name"`
-	Endpoint  string `json:"endpoint"`
-	DNS       string `json:"dns"`
-	Address   string `json:"address"`
-	UserToken string `json:"userToken"`
+	Name string `json:"name"` // for Windows service name
+
+	Endpoint            string `json:"endpoint"`
+	ID                  string `json:"id"`
+	Secret              string `json:"secret"`
+	MTU                 int    `json:"mtu"`
+	DNS                 string `json:"dns"`
+	Holepunch           bool   `json:"holepunch"`
+	PingIntervalSeconds int    `json:"pingIntervalSeconds"`
+	PingTimeoutSeconds  int    `json:"pingTimeoutSeconds"`
+	UserToken           string `json:"userToken"`
+	OrgID               string `json:"orgId"`
 }
 
 func StartTunnel(config Config) error {

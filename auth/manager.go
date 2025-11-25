@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -59,7 +58,6 @@ type AuthManager struct {
 	currentUser        *api.User
 	currentOrg         *api.Org
 	organizations      []api.Org
-	isLoading          bool
 	isInitializing     bool
 	errorMessage       *string
 	deviceAuthCode     *string
@@ -115,17 +113,6 @@ func (am *AuthManager) Initialize() error {
 
 // LoginWithCredentials authenticates with email and password
 func (am *AuthManager) LoginWithCredentials(email, password string, code *string) error {
-	am.mu.Lock()
-	am.isLoading = true
-	am.errorMessage = nil
-	am.mu.Unlock()
-
-	defer func() {
-		am.mu.Lock()
-		am.isLoading = false
-		am.mu.Unlock()
-	}()
-
 	loginResponse, token, err := am.apiClient.Login(email, password, code)
 	if err != nil {
 		am.mu.Lock()
@@ -168,17 +155,17 @@ func (am *AuthManager) LoginWithCredentials(email, password string, code *string
 }
 
 // LoginWithDeviceAuth authenticates using device authentication flow
-func (am *AuthManager) LoginWithDeviceAuth() error {
-	am.mu.Lock()
-	am.isLoading = true
-	am.errorMessage = nil
-	am.mu.Unlock()
-
-	defer func() {
-		am.mu.Lock()
-		am.isLoading = false
-		am.mu.Unlock()
-	}()
+// If hostnameOverride is provided, it will be used for the login flow instead of the API client's base URL
+func (am *AuthManager) LoginWithDeviceAuth(hostnameOverride *string) error {
+	// Use temporary API client if hostname override is provided
+	var loginClient *api.APIClient
+	if hostnameOverride != nil && *hostnameOverride != "" {
+		// Create temporary client with override hostname
+		loginClient = api.NewAPIClient(*hostnameOverride, "")
+	} else {
+		// Use main API client
+		loginClient = am.apiClient
+	}
 
 	// Get device name
 	deviceName, err := os.Hostname()
@@ -187,7 +174,7 @@ func (am *AuthManager) LoginWithDeviceAuth() error {
 	}
 
 	// Start device auth
-	startResponse, err := am.apiClient.StartDeviceAuth("Pangolin Windows Client", &deviceName)
+	startResponse, err := loginClient.StartDeviceAuth("Pangolin Windows Client", &deviceName)
 	if err != nil {
 		am.mu.Lock()
 		if apiErr, ok := err.(*api.APIError); ok {
@@ -203,7 +190,7 @@ func (am *AuthManager) LoginWithDeviceAuth() error {
 
 	// Store code and URL for UI display
 	code := startResponse.Code
-	loginURL := fmt.Sprintf("%s/auth/login/device", am.apiClient.CurrentBaseURL())
+	loginURL := fmt.Sprintf("%s/auth/login/device", loginClient.CurrentBaseURL())
 
 	am.mu.Lock()
 	am.deviceAuthCode = &code
@@ -218,7 +205,7 @@ func (am *AuthManager) LoginWithDeviceAuth() error {
 	for !verified && time.Now().Before(expiresAt) {
 		time.Sleep(3 * time.Second)
 
-		pollResponse, token, err := am.apiClient.PollDeviceAuth(code)
+		pollResponse, token, err := loginClient.PollDeviceAuth(code)
 		if err != nil {
 			// Continue polling on error
 			continue
@@ -253,11 +240,16 @@ func (am *AuthManager) LoginWithDeviceAuth() error {
 		return &AuthError{Type: AuthErrorInvalidToken}
 	}
 
+	// If hostname override was provided, update main API client's base URL
+	if hostnameOverride != nil && *hostnameOverride != "" {
+		am.apiClient.UpdateBaseURL(*hostnameOverride)
+	}
+
 	// Save token
 	am.secretManager.SaveSecret("session-token", *sessionToken)
 	am.apiClient.UpdateSessionToken(*sessionToken)
 
-	// Get user info
+	// Get user info using main API client (now with updated base URL if override was provided)
 	user, err := am.apiClient.GetUser()
 	if err != nil {
 		am.mu.Lock()
@@ -347,7 +339,7 @@ func (am *AuthManager) handleSuccessfulAuth(user *api.User, token string) error 
 	}
 
 	// Ensure OLM credentials exist for this device-account combo
-	if err := am.ensureOlmCredentials(user.UserId); err != nil {
+	if err := am.EnsureOlmCredentials(user.UserId); err != nil {
 		logger.Error("Failed to ensure OLM credentials: %v", err)
 		// Non-fatal, continue
 	}
@@ -417,6 +409,104 @@ func (am *AuthManager) RefreshOrganizations() error {
 	return nil
 }
 
+// RefreshFromMyDevice refreshes user info, organizations, and authentication status from MyDevice API
+func (am *AuthManager) RefreshFromMyDevice(olmId string) error {
+	am.mu.RLock()
+	authenticated := am.isAuthenticated
+	userId := ""
+	if am.currentUser != nil {
+		userId = am.currentUser.UserId
+	}
+	am.mu.RUnlock()
+
+	// Only refresh if authenticated and user ID is available
+	if !authenticated || userId == "" {
+		return nil
+	}
+
+	// Get MyDevice data
+	myDevice, err := am.apiClient.GetMyDevice(olmId)
+	if err != nil {
+		logger.Error("Failed to refresh from MyDevice: %v", err)
+		// If we get an unauthorized error, user might be logged out
+		if apiErr, ok := err.(*api.APIError); ok && apiErr.Status == 401 {
+			logger.Info("Session expired, clearing authentication")
+			am.mu.Lock()
+			am.isAuthenticated = false
+			am.mu.Unlock()
+		}
+		return err
+	}
+
+	am.mu.Lock()
+	defer am.mu.Unlock()
+
+	// Update user info
+	if myDevice.User.UserId != "" {
+		// Update current user if it matches
+		if am.currentUser != nil && am.currentUser.UserId == myDevice.User.UserId {
+			am.currentUser.Email = myDevice.User.Email
+			am.currentUser.Username = myDevice.User.Username
+			am.currentUser.Name = myDevice.User.Name
+		}
+	}
+
+	// Convert ResponseOrg to Org and update organizations
+	newOrgs := make([]api.Org, 0, len(myDevice.Orgs))
+	currentOrgId := ""
+	if am.currentOrg != nil {
+		currentOrgId = am.currentOrg.Id
+	}
+
+	for _, responseOrg := range myDevice.Orgs {
+		org := api.Org{
+			Id:   responseOrg.OrgId,
+			Name: responseOrg.OrgName,
+		}
+		newOrgs = append(newOrgs, org)
+
+		// Preserve current org selection if it still exists
+		if currentOrgId != "" && org.Id == currentOrgId {
+			am.currentOrg = &org
+		}
+	}
+
+	// If current org no longer exists, clear selection
+	if currentOrgId != "" && am.currentOrg != nil && am.currentOrg.Id != currentOrgId {
+		am.currentOrg = nil
+		cfg := am.configManager.GetConfig()
+		if cfg != nil {
+			cfg.OrgId = nil
+			am.configManager.Save(cfg)
+		}
+	}
+
+	// Update organizations list
+	am.organizations = newOrgs
+
+	// Ensure authentication is still set (should be true if we got here)
+	am.isAuthenticated = true
+
+	logger.Info("Refreshed from MyDevice")
+	return nil
+}
+
+// GetOlmId gets the OLM ID for the current user
+func (am *AuthManager) GetOlmId() (string, bool) {
+	am.mu.RLock()
+	userId := ""
+	if am.currentUser != nil {
+		userId = am.currentUser.UserId
+	}
+	am.mu.RUnlock()
+
+	if userId == "" {
+		return "", false
+	}
+
+	return am.secretManager.GetOlmId(userId)
+}
+
 // CheckOrgAccess checks if the user has access to an organization
 func (am *AuthManager) CheckOrgAccess(orgId string) (bool, error) {
 	// First, try to fetch the org to check access
@@ -472,7 +562,22 @@ func (am *AuthManager) CheckOrgAccess(orgId string) (bool, error) {
 
 				logger.Error("Org policy check for org %s: allowed=%v, error=%s, policies=[%s]", orgId, policyResponse.Allowed, errorMsg, policyLogMessage)
 
-				// Return false with a descriptive error
+				// Check if access is denied and show error message
+				if !policyResponse.Allowed {
+					// Get hostname for the resolution URL
+					hostname := am.configManager.GetHostname()
+					resolutionURL := fmt.Sprintf("%s/%s", hostname, orgId)
+
+					// Always use fallback message format
+					fallbackMsg := "Access denied due to organization policy violations."
+					if policyResponse.Error != nil && *policyResponse.Error != "" {
+						fallbackMsg = fmt.Sprintf("Access denied: %s", *policyResponse.Error)
+					}
+					fallbackMsg += fmt.Sprintf("\n\nSee more and resolve the issues by visiting: %s", resolutionURL)
+					return false, errors.New(fallbackMsg)
+				}
+
+				// Return false with a descriptive error (shouldn't reach here if Allowed is true)
 				return false, fmt.Errorf("org policy preventing access to this org")
 			}
 		}
@@ -512,34 +617,27 @@ func (am *AuthManager) SelectOrganization(org *api.Org) error {
 }
 
 // EnsureOlmCredentials ensures OLM credentials exist for the user
-func (am *AuthManager) ensureOlmCredentials(userId string) error {
+func (am *AuthManager) EnsureOlmCredentials(userId string) error {
 	// Check if OLM credentials already exist locally
 	if am.secretManager.HasOlmCredentials(userId) {
-		// Verify OLM exists on server by getting the client
+		// Verify OLM exists on server by getting the OLM directly
 		olmIdString, found := am.secretManager.GetOlmId(userId)
 		if found {
-			clientId, err := strconv.Atoi(olmIdString)
-			if err == nil {
-				client, err := am.apiClient.GetClient(clientId)
-				if err == nil {
-					// Verify the olmId matches
-					if client.OlmId != nil && *client.OlmId == olmIdString {
-						logger.Info("OLM credentials verified successfully")
-						return nil
-					} else {
-						logger.Error("OLM ID mismatch - client olmId: %v, stored olmId: %s", client.OlmId, olmIdString)
-						// Clear invalid credentials
-						am.secretManager.DeleteOlmCredentials(userId)
-					}
+			olm, err := am.apiClient.GetUserOlm(userId, olmIdString)
+			if err == nil && olm != nil {
+				// Verify the olmId matches
+				if olm.OlmId == olmIdString {
+					logger.Info("OLM credentials verified successfully")
+					return nil
 				} else {
-					// If getting client fails, the OLM might not exist
-					logger.Error("Failed to verify OLM credentials: %v", err)
-					// Clear invalid credentials so we can try to create new ones
+					logger.Error("OLM ID mismatch - olm olmId: %s, stored olmId: %s", olm.OlmId, olmIdString)
+					// Clear invalid credentials
 					am.secretManager.DeleteOlmCredentials(userId)
 				}
 			} else {
-				// Can't convert olmId to Int, clear credentials
-				logger.Error("Cannot verify OLM - olmId is not a valid clientId")
+				// If getting OLM fails, the OLM might not exist
+				logger.Error("Failed to verify OLM credentials: %v", err)
+				// Clear invalid credentials so we can try to create new ones
 				am.secretManager.DeleteOlmCredentials(userId)
 			}
 		}
@@ -569,16 +667,6 @@ func (am *AuthManager) ensureOlmCredentials(userId string) error {
 
 // Logout logs out the current user
 func (am *AuthManager) Logout() error {
-	am.mu.Lock()
-	am.isLoading = true
-	am.mu.Unlock()
-
-	defer func() {
-		am.mu.Lock()
-		am.isLoading = false
-		am.mu.Unlock()
-	}()
-
 	// Try to call logout endpoint (ignore errors)
 	_ = am.apiClient.Logout()
 
@@ -623,12 +711,6 @@ func (am *AuthManager) Organizations() []api.Org {
 	return am.organizations
 }
 
-func (am *AuthManager) IsLoading() bool {
-	am.mu.RLock()
-	defer am.mu.RUnlock()
-	return am.isLoading
-}
-
 func (am *AuthManager) IsInitializing() bool {
 	am.mu.RLock()
 	defer am.mu.RUnlock()
@@ -651,6 +733,13 @@ func (am *AuthManager) DeviceAuthLoginURL() *string {
 	am.mu.RLock()
 	defer am.mu.RUnlock()
 	return am.deviceAuthLoginURL
+}
+
+// UpdateCurrentUser updates the current user (used for session verification)
+func (am *AuthManager) UpdateCurrentUser(user *api.User) {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+	am.currentUser = user
 }
 
 // Helper function

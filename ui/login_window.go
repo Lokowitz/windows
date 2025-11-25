@@ -14,6 +14,7 @@ import (
 	"github.com/fosrl/windows/api"
 	"github.com/fosrl/windows/auth"
 	"github.com/fosrl/windows/config"
+	"github.com/fosrl/windows/tunnel"
 
 	"github.com/fosrl/newt/logger"
 	"github.com/tailscale/walk"
@@ -39,10 +40,9 @@ const (
 	stateSuccess
 )
 
-// getIconsPath returns the path to the icons directory
-// Checks relative to executable first (for development), then falls back to installed location
+// Checks relative to executable first, then falls back to installed location
 func getIconsPath() string {
-	// Try relative to executable first (for development)
+	// Try relative to executable first
 	exePath, err := os.Executable()
 	if err == nil {
 		exeDir := filepath.Dir(exePath)
@@ -85,7 +85,7 @@ func isDarkMode() bool {
 }
 
 // ShowLoginDialog shows the login dialog with full authentication flow
-func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configManager *config.ConfigManager, apiClient *api.APIClient) {
+func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configManager *config.ConfigManager, apiClient *api.APIClient, tunnelManager *tunnel.Manager) {
 	var dlg *walk.Dialog
 	var contentComposite *walk.Composite
 	var buttonComposite *walk.Composite
@@ -96,6 +96,8 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 	selfHostedURL := ""
 	isLoggingIn := false
 	hasAutoOpenedBrowser := false
+	// Initialize temporary hostname from config (will be used for login flow, only persisted after successful login)
+	temporaryHostname := configManager.GetHostname()
 
 	// UI components
 	var cloudButton, selfHostedButton *walk.PushButton
@@ -105,7 +107,6 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 	var copyButton, openBrowserButton *walk.PushButton
 	var manualURLLabel *walk.Label
 	var progressBar *walk.ProgressBar
-	var successLabel *walk.Label
 	var backButton, cancelButton, loginButton *walk.PushButton
 	var logoContainer *walk.Composite
 
@@ -122,8 +123,8 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 
 	updateButtons := func() {
 		walk.App().Synchronize(func() {
-			showBack := currentState != stateHostingSelection && currentState != stateSuccess
-			showCancel := currentState != stateSuccess
+			showBack := currentState != stateHostingSelection
+			showCancel := true
 			showLogin := currentState == stateReadyToLogin
 
 			if backButton != nil {
@@ -147,7 +148,6 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 			showHostingSelection := currentState == stateHostingSelection
 			showReadyToLogin := currentState == stateReadyToLogin
 			showDeviceAuthCode := currentState == stateDeviceAuthCode
-			showSuccess := currentState == stateSuccess
 
 			if cloudButton != nil {
 				cloudButton.SetVisible(showHostingSelection)
@@ -182,10 +182,6 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 				progressBar.SetVisible(showDeviceAuthCode)
 			}
 
-			if successLabel != nil {
-				successLabel.SetVisible(showSuccess)
-			}
-
 			// Update buttons
 			updateButtons()
 		})
@@ -203,7 +199,11 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 				// Auto-open browser when code is generated
 				if !hasAutoOpenedBrowser {
 					hasAutoOpenedBrowser = true
-					hostname := configManager.GetHostname()
+					// Use temporary hostname if set, otherwise fall back to saved hostname
+					hostname := temporaryHostname
+					if hostname == "" {
+						hostname = configManager.GetHostname()
+					}
 					if hostname != "" {
 						// Remove middle hyphen from code (e.g., "XXXX-XXXX" -> "XXXXXXXX")
 						codeWithoutHyphen := strings.ReplaceAll(codeStr, "-", "")
@@ -216,7 +216,8 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 	}
 
 	performLogin := func() {
-		// Ensure server URL is configured
+		// Ensure server URL is configured (but don't persist yet)
+		var hostnameToSave string
 		if hostingOpt == hostingSelfHosted {
 			url := strings.TrimSpace(selfHostedURL)
 			if url == "" {
@@ -235,16 +236,15 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 				})
 				return
 			}
-			cfg := configManager.GetConfig()
-			if cfg == nil {
-				cfg = &config.Config{}
-			}
-			cfg.Hostname = &url
-			configManager.Save(cfg)
-			apiClient.UpdateBaseURL(url)
+			hostnameToSave = url
+			temporaryHostname = url
+		} else if hostingOpt == hostingCloud {
+			hostnameToSave = "https://app.pangolin.net"
+			temporaryHostname = hostnameToSave
 		}
 
-		err := authManager.LoginWithDeviceAuth()
+		// Pass temporary hostname to login (it will use a temporary API client internally)
+		err := authManager.LoginWithDeviceAuth(&temporaryHostname)
 		if err != nil {
 			walk.App().Synchronize(func() {
 				isLoggingIn = false
@@ -267,57 +267,61 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 			return
 		}
 
-		// Success - show success view, then close after 2 seconds
-		walk.App().Synchronize(func() {
-			currentState = stateSuccess
-			isLoggingIn = false
-			updateUI()
+		// Login succeeded - now persist the hostname
+		if hostnameToSave != "" {
+			cfg := configManager.GetConfig()
+			if cfg == nil {
+				cfg = &config.Config{}
+			}
+			cfg.Hostname = &hostnameToSave
+			configManager.Save(cfg)
+			// Update API client's base URL now that login succeeded
+			apiClient.UpdateBaseURL(hostnameToSave)
+		}
 
-			// Close window after 2 seconds
-			go func() {
-				time.Sleep(2 * time.Second)
-				walk.App().Synchronize(func() {
-					dlg.Accept()
-				})
-			}()
+		// Success - stop tunnel if running, then close
+		if tunnelManager != nil && tunnelManager.IsConnected() {
+			logger.Info("Stopping tunnel after successful login")
+			if err := tunnelManager.Disconnect(); err != nil {
+				logger.Error("Failed to stop tunnel after login: %v", err)
+				// Still close the dialog even if disconnect fails
+			}
+		}
+
+		walk.App().Synchronize(func() {
+			isLoggingIn = false
+			dlg.Accept()
 		})
 	}
 
 	Dialog{
 		AssignTo: &dlg,
-		Title:    "Login",
-		MinSize:  Size{Width: 450, Height: 400},
-		MaxSize:  Size{Width: 450, Height: 400},
-		Layout:   VBox{MarginsZero: true, Spacing: 10},
+		Title:    "Login to Pangolin",
+		MinSize:  Size{Width: 450, Height: 330},
+		MaxSize:  Size{Width: 450, Height: 330},
+		Layout:   VBox{Margins: Margins{Left: 20, Top: 10, Right: 20, Bottom: 10}, Spacing: 5},
 		Children: []Widget{
 			// Logo container at top
 			Composite{
 				AssignTo: &logoContainer,
 				Layout:   HBox{MarginsZero: true, Alignment: AlignHCenterVNear},
 				MinSize:  Size{Width: 0, Height: 60},
+				MaxSize:  Size{Width: 0, Height: 60},
 			},
-			// Content area
+			// Content area - expands to fill available space and centers its children
 			Composite{
 				AssignTo: &contentComposite,
-				Layout:   VBox{MarginsZero: true, Alignment: AlignHCenterVCenter, Spacing: 12},
-				MinSize:  Size{Width: 0, Height: 250},
+				Layout:   VBox{MarginsZero: true, Alignment: AlignHCenterVCenter, Spacing: 4},
 				Children: []Widget{
 					// Hosting selection buttons
 					PushButton{
 						AssignTo: &cloudButton,
-						Text:     "Pangolin Cloud\napp.pangolin.net",
-						MinSize:  Size{Width: 300, Height: 60},
+						Text:     "Pangolin Cloud",
+						MinSize:  Size{Width: 300, Height: 40},
 						OnClicked: func() {
 							hostingOpt = hostingCloud
-							// Set cloud hostname
-							cfg := configManager.GetConfig()
-							if cfg == nil {
-								cfg = &config.Config{}
-							}
-							hostname := "https://app.pangolin.net"
-							cfg.Hostname = &hostname
-							configManager.Save(cfg)
-							apiClient.UpdateBaseURL(hostname)
+							// Set temporary hostname for login flow (not persisted until successful login)
+							temporaryHostname = "https://app.pangolin.net"
 
 							// Immediately start device auth flow for cloud
 							currentState = stateDeviceAuthCode
@@ -328,8 +332,8 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 					},
 					PushButton{
 						AssignTo: &selfHostedButton,
-						Text:     "Self-hosted or dedicated instance\nEnter your custom hostname",
-						MinSize:  Size{Width: 300, Height: 60},
+						Text:     "Self-hosted or dedicated instance",
+						MinSize:  Size{Width: 300, Height: 40},
 						OnClicked: func() {
 							hostingOpt = hostingSelfHosted
 							currentState = stateReadyToLogin
@@ -359,15 +363,14 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 						OnTextChanged: func() {
 							if urlLineEdit != nil {
 								selfHostedURL = urlLineEdit.Text()
-								// Update config and API client as user types
-								cfg := configManager.GetConfig()
-								if cfg == nil {
-									cfg = &config.Config{}
-								}
-								if selfHostedURL != "" {
-									cfg.Hostname = &selfHostedURL
-									configManager.Save(cfg)
-									apiClient.UpdateBaseURL(selfHostedURL)
+								// Clean the URL: trim spaces and remove trailing slashes
+								cleanedURL := strings.TrimSpace(selfHostedURL)
+								cleanedURL = strings.TrimRight(cleanedURL, "/")
+
+								if cleanedURL != "" {
+									temporaryHostname = cleanedURL
+								} else {
+									temporaryHostname = ""
 								}
 								updateButtons()
 							}
@@ -414,36 +417,19 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 							},
 						},
 					},
-					Label{
-						AssignTo:  &manualURLLabel,
-						Text:      "",
-						Alignment: AlignHCenterVNear,
-						MaxSize:   Size{Width: 400, Height: 0},
-						Visible:   false,
-					},
-					ProgressBar{
-						AssignTo: &progressBar,
-						Visible:  false,
-					},
-					// Success view
-					Label{
-						AssignTo:  &successLabel,
-						Text:      "✓\nAuthentication Successful\nYou have been successfully logged in.",
-						Alignment: AlignHCenterVCenter,
-						Font:      Font{PointSize: 12, Bold: true},
-						Visible:   false,
-					},
 				},
 			},
-			VSpacer{},
 			// Buttons at bottom
 			Composite{
 				AssignTo: &buttonComposite,
 				Layout:   HBox{MarginsZero: true, Alignment: AlignHFarVNear, Spacing: 8},
 				Children: []Widget{
+					HSpacer{},
 					PushButton{
 						AssignTo: &backButton,
 						Text:     "Back",
+						MinSize:  Size{Width: 75, Height: 0},
+						MaxSize:  Size{Width: 75, Height: 0},
 						Visible:  false,
 						OnClicked: func() {
 							if currentState == stateDeviceAuthCode {
@@ -465,6 +451,8 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 					PushButton{
 						AssignTo: &cancelButton,
 						Text:     "Cancel",
+						MinSize:  Size{Width: 75, Height: 0},
+						MaxSize:  Size{Width: 75, Height: 0},
 						OnClicked: func() {
 							dlg.Cancel()
 						},
@@ -472,6 +460,8 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 					PushButton{
 						AssignTo: &loginButton,
 						Text:     "Log in",
+						MinSize:  Size{Width: 75, Height: 0},
+						MaxSize:  Size{Width: 75, Height: 0},
 						Visible:  false,
 						OnClicked: func() {
 							currentState = stateDeviceAuthCode
@@ -485,25 +475,55 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 		},
 	}.Create(parent)
 
-	// Disable maximize and minimize buttons
+	// Disable maximize, minimize buttons, and resizing
 	style := win.GetWindowLong(dlg.Handle(), win.GWL_STYLE)
 	style &^= win.WS_MAXIMIZEBOX
 	style &^= win.WS_MINIMIZEBOX
+	style &^= win.WS_THICKFRAME // Remove resize border
 	win.SetWindowLong(dlg.Handle(), win.GWL_STYLE, style)
 
+	// Make dialog appear in taskbar by setting WS_EX_APPWINDOW extended style
+	const GWL_EXSTYLE = -20
+	const WS_EX_APPWINDOW = 0x00040000
+	exStyle := win.GetWindowLong(dlg.Handle(), GWL_EXSTYLE)
+	exStyle |= WS_EX_APPWINDOW
+	win.SetWindowLong(dlg.Handle(), GWL_EXSTYLE, exStyle)
+
 	// Set fixed size
-	dlg.SetSize(walk.Size{Width: 450, Height: 400})
+	dlg.SetSize(walk.Size{Width: 450, Height: 330})
+
+	// Set window icon
+	iconsPath := getIconsPath()
+	iconPath := filepath.Join(iconsPath, "icon-orange.ico")
+	icon, err := walk.NewIconFromFile(iconPath)
+	if err != nil {
+		logger.Error("Failed to load window icon from %s: %v", iconPath, err)
+	} else {
+		if err := dlg.SetIcon(icon); err != nil {
+			logger.Error("Failed to set window icon: %v", err)
+		}
+	}
+
+	// Set background color (always light mode)
+	bgBrush, _ := walk.NewSolidColorBrush(walk.RGB(0xFC, 0xFC, 0xFC)) // #FCFCFC
+	if bgBrush != nil {
+		dlg.SetBackground(bgBrush)
+		if contentComposite != nil {
+			contentComposite.SetBackground(bgBrush)
+		}
+		if buttonComposite != nil {
+			buttonComposite.SetBackground(bgBrush)
+		}
+		if logoContainer != nil {
+			logoContainer.SetBackground(bgBrush)
+		}
+	}
 
 	// Load and display word mark logo
 	if logoContainer != nil {
-		// Determine which word mark to use based on theme
+		// Always use black word mark (light mode)
 		iconsPath := getIconsPath()
-		var imagePath string
-		if isDarkMode() {
-			imagePath = filepath.Join(iconsPath, "word_mark_white.png")
-		} else {
-			imagePath = filepath.Join(iconsPath, "word_mark_black.png")
-		}
+		imagePath := filepath.Join(iconsPath, "word_mark_black.png")
 
 		// Create ImageView widget
 		logoImageView, err := walk.NewImageView(logoContainer)

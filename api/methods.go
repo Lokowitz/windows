@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -168,6 +169,22 @@ func (c *APIClient) CreateOlm(userId, name string) (*CreateOlmResponse, error) {
 	return &response, nil
 }
 
+// GetUserOlm gets an OLM for a user by userId and olmId
+func (c *APIClient) GetUserOlm(userId, olmId string) (*Olm, error) {
+	path := fmt.Sprintf("/user/%s/olm/%s", userId, olmId)
+	data, resp, err := c.makeRequest("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var olm Olm
+	if err := c.parseResponse(data, resp, &olm); err != nil {
+		return nil, err
+	}
+
+	return &olm, nil
+}
+
 // GetOrg gets an organization by ID
 func (c *APIClient) GetOrg(orgId string) (*GetOrgResponse, error) {
 	path := fmt.Sprintf("/org/%s", orgId)
@@ -209,6 +226,26 @@ func (c *APIClient) GetClient(clientId int) (*GetClientResponse, error) {
 	}
 
 	var response GetClientResponse
+	if err := c.parseResponse(data, resp, &response); err != nil {
+		return nil, err
+	}
+
+	return &response, nil
+}
+
+// GetMyDevice gets the current device information including user, organizations, and OLM
+func (c *APIClient) GetMyDevice(olmId string) (*MyDeviceResponse, error) {
+	// Build query parameters
+	params := url.Values{}
+	params.Set("olmId", olmId)
+	path := fmt.Sprintf("/my-device?%s", params.Encode())
+
+	data, resp, err := c.makeRequest("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var response MyDeviceResponse
 	if err := c.parseResponse(data, resp, &response); err != nil {
 		return nil, err
 	}

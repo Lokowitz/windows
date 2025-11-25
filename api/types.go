@@ -69,7 +69,7 @@ type ListUserOrgsResponse struct {
 
 // Org represents an organization
 type Org struct {
-	Id   string `json:"id"`
+	Id   string `json:"orgId"`
 	Name string `json:"name"`
 }
 
@@ -125,4 +125,40 @@ type GetClientResponse struct {
 	Id    int     `json:"id"`
 	Name  string  `json:"name"`
 	OlmId *string `json:"olmId,omitempty"`
+}
+
+// MyDeviceUser represents a user in the my device response
+type MyDeviceUser struct {
+	UserId            string  `json:"userId"`
+	Email             string  `json:"email"`
+	Username          *string `json:"username,omitempty"`
+	Name              *string `json:"name,omitempty"`
+	Type              *string `json:"type,omitempty"`
+	TwoFactorEnabled  *bool   `json:"twoFactorEnabled,omitempty"`
+	EmailVerified     *bool   `json:"emailVerified,omitempty"`
+	ServerAdmin       *bool   `json:"serverAdmin,omitempty"`
+	IdpName           *string `json:"idpName,omitempty"`
+	IdpId             *string `json:"idpId,omitempty"`
+}
+
+// ResponseOrg represents an organization in the my device response
+type ResponseOrg struct {
+	OrgId   string `json:"orgId"`
+	OrgName string `json:"orgName"`
+	RoleId  int    `json:"roleId"`
+}
+
+// Olm represents an OLM (Online Management) record
+type Olm struct {
+	OlmId  string  `json:"olmId"`
+	UserId string  `json:"userId"`
+	Name   *string `json:"name,omitempty"`
+	Secret *string `json:"secret,omitempty"`
+}
+
+// MyDeviceResponse represents the response for getting my device
+type MyDeviceResponse struct {
+	User MyDeviceUser  `json:"user"`
+	Orgs []ResponseOrg `json:"orgs"`
+	Olm  *Olm          `json:"olm,omitempty"`
 }

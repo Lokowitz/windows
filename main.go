@@ -225,7 +225,7 @@ func main() {
 	}
 
 	// Setup tray icon and menu
-	if err := ui.SetupTray(mw, authManager, configManager, apiClient); err != nil {
+	if err := ui.SetupTray(mw, authManager, configManager, apiClient, secretManager); err != nil {
 		logger.Fatal("Failed to setup tray: %v", err)
 	}
 
