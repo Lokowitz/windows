@@ -36,6 +36,9 @@ func notifyStateChange(state State) {
 	}
 }
 
+// OLMNamedPipePath is the Windows named pipe path for OLM API communication
+const OLMNamedPipePath = `\\.\pipe\pangolin-olm`
+
 // State represents the state of a tunnel
 type State int
 
@@ -74,6 +77,32 @@ func (s State) String() string {
 		return "error"
 	default:
 		return "unknown"
+	}
+}
+
+// DisplayText returns a human-readable display text for the tunnel state
+func (s State) DisplayText() string {
+	switch s {
+	case StateStopped:
+		return "Disconnected"
+	case StateStarting:
+		return "Connecting..."
+	case StateRegistering:
+		return "Registering..."
+	case StateRegistered:
+		return "Connecting..."
+	case StateRunning:
+		return "Connected"
+	case StateReconnecting:
+		return "Reconnecting..."
+	case StateStopping:
+		return "Disconnecting..."
+	case StateInvalid:
+		return "Invalid"
+	case StateError:
+		return "Error"
+	default:
+		return "Unknown"
 	}
 }
 

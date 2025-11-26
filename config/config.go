@@ -15,6 +15,7 @@ const (
 	AppName         = "Pangolin"
 	DefaultHostname = "https://app.pangolin.net"
 	ConfigFileName  = "pangolin.json"
+	LogLevel        = "debug" // Centralized log level for the application
 )
 
 // Config represents the application configuration

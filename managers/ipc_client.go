@@ -32,7 +32,6 @@ const (
 	UpdateMethodType
 	StartTunnelMethodType
 	StopTunnelMethodType
-	SwitchOrgMethodType
 )
 
 var (
@@ -242,22 +241,6 @@ func IPCClientStopTunnel() error {
 	defer rpcMutex.Unlock()
 
 	err := rpcEncoder.Encode(StopTunnelMethodType)
-	if err != nil {
-		return err
-	}
-	err = rpcDecodeError()
-	return err
-}
-
-func IPCClientSwitchOrg(orgID string) error {
-	rpcMutex.Lock()
-	defer rpcMutex.Unlock()
-
-	err := rpcEncoder.Encode(SwitchOrgMethodType)
-	if err != nil {
-		return err
-	}
-	err = rpcEncoder.Encode(orgID)
 	if err != nil {
 		return err
 	}

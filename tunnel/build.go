@@ -9,6 +9,7 @@ import (
 	"github.com/fosrl/newt/logger"
 
 	olmpkg "github.com/fosrl/olm/olm"
+	configpkg "github.com/fosrl/windows/config"
 )
 
 // buildTunnel builds the tunnel
@@ -20,9 +21,9 @@ func buildTunnel(config Config) error {
 
 	// Create OLM GlobalConfig with hardcoded values from Swift
 	olmInitConfig := olmpkg.GlobalConfig{
-		LogLevel:   "debug",
+		LogLevel:   configpkg.LogLevel,
 		EnableAPI:  true,
-		SocketPath: `\\.\pipe\pangolin-olm`,
+		SocketPath: OLMNamedPipePath,
 		Version:    "1",
 		OnConnected: func() {
 			logger.Info("Tunnel: OLM connected")

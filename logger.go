@@ -14,6 +14,25 @@ import (
 	"github.com/fosrl/newt/logger"
 )
 
+// stringToLogLevel converts a string log level to logger.LogLevel
+// Returns INFO as default if the string doesn't match any known level
+func stringToLogLevel(levelStr string) logger.LogLevel {
+	switch strings.ToUpper(levelStr) {
+	case "DEBUG":
+		return logger.DEBUG
+	case "INFO":
+		return logger.INFO
+	case "WARN":
+		return logger.WARN
+	case "ERROR":
+		return logger.ERROR
+	case "FATAL":
+		return logger.FATAL
+	default:
+		return logger.INFO // Default to INFO if unknown
+	}
+}
+
 // setupLogging initializes the logger and sets up log file output with rotation
 func setupLogging() {
 	// Initialize the logger (GetLogger will auto-initialize if needed)
@@ -43,8 +62,14 @@ func setupLogging() {
 	}
 
 	// Set the custom logger output
-	logger.GetLogger().SetOutput(file)
-	logger.Info("Pangolin logging initialized - log file: %s", logFile)
+	logInstance := logger.GetLogger()
+	logInstance.SetOutput(file)
+
+	// Set the log level from centralized config
+	logLevel := stringToLogLevel(config.LogLevel)
+	logInstance.SetLevel(logLevel)
+
+	logger.Info("Pangolin logging initialized - log file: %s, log level: %s", logFile, config.LogLevel)
 }
 
 // rotateLogFile handles daily log rotation

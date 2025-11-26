@@ -99,32 +99,6 @@ func openURL(url string) {
 	browser.OpenURL(url)
 }
 
-// getTunnelStatusDisplayText returns the display text for tunnel status
-func getTunnelStatusDisplayText(state tunnel.State) string {
-	switch state {
-	case tunnel.StateStopped:
-		return "Disconnected"
-	case tunnel.StateStarting:
-		return "Connecting..."
-	case tunnel.StateRegistering:
-		return "Registering..."
-	case tunnel.StateRegistered:
-		return "Connecting..."
-	case tunnel.StateRunning:
-		return "Connected"
-	case tunnel.StateReconnecting:
-		return "Reconnecting..."
-	case tunnel.StateStopping:
-		return "Disconnecting..."
-	case tunnel.StateInvalid:
-		return "Invalid"
-	case tunnel.StateError:
-		return "Error"
-	default:
-		return "Unknown"
-	}
-}
-
 // handleMenuOpen verifies session and refreshes organizations when menu opens
 func handleMenuOpen() {
 	if authManager == nil || apiClient == nil {
@@ -655,7 +629,7 @@ func updateTunnelState() {
 		tunnelStateMutex.RUnlock()
 	}
 
-	statusAction.SetText(getTunnelStatusDisplayText(state))
+	statusAction.SetText(state.DisplayText())
 
 	var connected bool
 	if tunnelManager != nil {
@@ -833,7 +807,7 @@ func updateOrganizations() {
 						updateMenu()
 
 						if tunnelManager.IsConnected() {
-							if err := tunnelManager.SwitchOrg(orgCopy.Id); err != nil {
+							if err := tunnelManager.SwitchOLMOrg(orgCopy.Id); err != nil {
 								logger.Error("Failed to switch tunnel organization: %v", err)
 								// Show error dialog to user
 								walk.App().Synchronize(func() {

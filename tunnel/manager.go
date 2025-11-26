@@ -26,7 +26,6 @@ import (
 type IPCClient interface {
 	StartTunnel(config Config) error
 	StopTunnel() error
-	SwitchOrg(orgID string) error
 	RegisterStateChangeCallback(cb func(State)) func() // Returns unregister function
 }
 
@@ -148,7 +147,7 @@ func (tm *Manager) buildConfig() (Config, error) {
 	}
 
 	config := Config{
-		Name:                "pangolin-tunnel",
+		Name:                "olm",
 		ID:                  olmId,
 		Secret:              olmSecret,
 		UserToken:           userToken,
@@ -159,7 +158,7 @@ func (tm *Manager) buildConfig() (Config, error) {
 		Endpoint:            tm.configManager.GetHostname(),
 		DNS:                 "8.8.8.8",
 		OrgID:               currentOrg.Id,
-		InterfaceName:       "olm",
+		InterfaceName:       "Pangolin",
 		UpstreamDNS:         []string{"8.8.8.8:53"},
 	}
 
@@ -351,61 +350,6 @@ func (tm *Manager) Disconnect() error {
 	return nil
 }
 
-// SwitchOrg switches the organization for the running tunnel
-func (tm *Manager) SwitchOrg(orgID string) error {
-	tm.mu.RLock()
-	currentState := tm.currentState
-	tm.mu.RUnlock()
-
-	// Only allow switching org if tunnel is running
-	if currentState != StateRunning {
-		logger.Info("Tunnel is not running, cannot switch organization")
-		return fmt.Errorf("tunnel is not running")
-	}
-
-	logger.Info("Switching tunnel organization to: %s", orgID)
-	if tm.ipcClient == nil {
-		return fmt.Errorf("IPC client not initialized")
-	}
-	err := tm.ipcClient.SwitchOrg(orgID)
-	if err != nil {
-		logger.Error("Failed to switch organization: %v", err)
-		return err
-	}
-
-	return nil
-}
-
-// GetStatusDisplayText returns a human-readable status text for the current state
-func (tm *Manager) GetStatusDisplayText() string {
-	tm.mu.RLock()
-	state := tm.currentState
-	tm.mu.RUnlock()
-
-	switch state {
-	case StateStopped:
-		return "Disconnected"
-	case StateStarting:
-		return "Connecting..."
-	case StateRegistering:
-		return "Registering..."
-	case StateRegistered:
-		return "Connecting..."
-	case StateRunning:
-		return "Connected"
-	case StateReconnecting:
-		return "Reconnecting..."
-	case StateStopping:
-		return "Disconnecting..."
-	case StateInvalid:
-		return "Invalid"
-	case StateError:
-		return "Error"
-	default:
-		return "Unknown"
-	}
-}
-
 // OLMStatusResponse represents the status response from OLM API
 type OLMStatusResponse struct {
 	Connected       bool                   `json:"connected"`
@@ -434,9 +378,7 @@ type SwitchOrgRequest struct {
 
 // getOLMPipePath returns the Windows named pipe path for OLM
 func getOLMPipePath() string {
-	// Windows named pipes are virtual objects in NPFS, not filesystem paths
-	// Use a simple, Windows-idiomatic name
-	return `\\.\pipe\pangolin-olm`
+	return OLMNamedPipePath
 }
 
 // createOLMHTTPClient creates an HTTP client that can connect to OLM via named pipe
@@ -497,9 +439,21 @@ func (tm *Manager) GetOLMStatus() (*OLMStatusResponse, error) {
 
 // SwitchOLMOrg switches the organization in OLM via the named pipe API
 func (tm *Manager) SwitchOLMOrg(orgID string) error {
+	tm.mu.RLock()
+	currentState := tm.currentState
+	tm.mu.RUnlock()
+
+	// Only allow switching org if tunnel is running
+	if currentState != StateRunning {
+		logger.Info("Tunnel is not running, cannot switch organization")
+		return fmt.Errorf("tunnel is not running")
+	}
+
 	if orgID == "" {
 		return fmt.Errorf("orgID cannot be empty")
 	}
+
+	logger.Info("Switching tunnel organization to: %s", orgID)
 
 	client, err := createOLMHTTPClient()
 	if err != nil {
