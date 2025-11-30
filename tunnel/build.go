@@ -57,6 +57,7 @@ func buildTunnel(config Config, olmTerminateCancel context.CancelFunc) error {
 		OrgID:                config.OrgID,
 		InterfaceName:        config.InterfaceName,
 		UpstreamDNS:          config.UpstreamDNS,
+		OverrideDNS:          true,
 	}
 
 	olmpkg.StartApi()

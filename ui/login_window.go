@@ -434,12 +434,6 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 							}
 						},
 					},
-					Label{
-						AssignTo:  &hintLabel,
-						Text:      "Enter your Pangolin server URL",
-						Alignment: AlignHCenterVNear,
-						Visible:   false,
-					},
 					// Device auth code display
 					Label{
 						AssignTo:  &codeLabel,
