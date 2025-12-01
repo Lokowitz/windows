@@ -141,7 +141,8 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 	var progressBar *walk.ProgressBar
 	var backButton, cancelButton, loginButton *walk.PushButton
 	var logoContainer *walk.Composite
-	var termsLabel, termsLinkLabel, andLabel, privacyLinkLabel *walk.Label
+	var termsLabel, andLabel *walk.Label
+	var termsLinkLabel, privacyLinkLabel *walk.LinkLabel
 	var termsComposite *walk.Composite
 
 	isReadyToLogin := func() bool {
@@ -498,12 +499,14 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 						Alignment: AlignHNearVCenter,
 						TextColor: walk.RGB(0x80, 0x80, 0x80), // Secondary gray color
 					},
-					Label{
+					LinkLabel{
 						AssignTo:  &termsLinkLabel,
-						Text:      "Terms of Service",
-						Font:      Font{PointSize: 8, Underline: true},
+						Text:      `<a href="https://pangolin.net/terms-of-service.html">Terms of Service</a>`,
+						Font:      Font{PointSize: 8},
 						Alignment: AlignHNearVCenter,
-						TextColor: walk.RGB(0x00, 0x7A, 0xCC), // Blue color for link
+						OnLinkActivated: func(link *walk.LinkLabelLink) {
+							openBrowser("https://pangolin.net/terms-of-service.html")
+						},
 					},
 					Label{
 						AssignTo:  &andLabel,
@@ -512,12 +515,14 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 						Alignment: AlignHNearVCenter,
 						TextColor: walk.RGB(0x80, 0x80, 0x80), // Secondary gray color
 					},
-					Label{
+					LinkLabel{
 						AssignTo:  &privacyLinkLabel,
-						Text:      "Privacy Policy.",
-						Font:      Font{PointSize: 8, Underline: true},
+						Text:      `<a href="https://pangolin.net/privacy-policy.html">Privacy Policy</a>.`,
+						Font:      Font{PointSize: 8},
 						Alignment: AlignHNearVCenter,
-						TextColor: walk.RGB(0x00, 0x7A, 0xCC), // Blue color for link
+						OnLinkActivated: func(link *walk.LinkLabelLink) {
+							openBrowser("https://pangolin.net/privacy-policy.html")
+						},
 					},
 				},
 			},
@@ -649,26 +654,6 @@ func ShowLoginDialog(parent walk.Form, authManager *auth.AuthManager, configMana
 				logoImageView.SetImage(img)
 			}
 		}
-	}
-
-	// Attach click handlers to terms and privacy labels
-	if termsLinkLabel != nil {
-		termsLinkLabel.MouseDown().Attach(func(x, y int, button walk.MouseButton) {
-			if button == walk.LeftButton {
-				openBrowser("https://pangolin.net/terms-of-service.html")
-			}
-		})
-		// Change cursor to hand pointer on hover
-		termsLinkLabel.SetCursor(walk.CursorHand())
-	}
-	if privacyLinkLabel != nil {
-		privacyLinkLabel.MouseDown().Attach(func(x, y int, button walk.MouseButton) {
-			if button == walk.LeftButton {
-				openBrowser("https://pangolin.net/privacy-policy.html")
-			}
-		})
-		// Change cursor to hand pointer on hover
-		privacyLinkLabel.SetCursor(walk.CursorHand())
 	}
 
 	// Initial UI update
