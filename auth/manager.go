@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -168,11 +167,8 @@ func (am *AuthManager) LoginWithDeviceAuth(ctx context.Context, hostnameOverride
 		loginClient = am.apiClient
 	}
 
-	// Get device name
-	deviceName, err := os.Hostname()
-	if err != nil {
-		deviceName = "Windows Device"
-	}
+	// Get friendly device name (e.g., "Windows Laptop" or "Windows Desktop")
+	deviceName := config.GetFriendlyDeviceName()
 
 	// Start device auth
 	startResponse, err := loginClient.StartDeviceAuth("Pangolin Windows Client", &deviceName)
@@ -656,10 +652,8 @@ func (am *AuthManager) EnsureOlmCredentials(userId string) error {
 
 	// If credentials don't exist or were cleared, create new ones
 	if !am.secretManager.HasOlmCredentials(userId) {
-		deviceName, err := os.Hostname()
-		if err != nil {
-			deviceName = "Windows Device"
-		}
+		// Get friendly device name (e.g., "Windows Laptop" or "Windows Desktop")
+		deviceName := config.GetFriendlyDeviceName()
 
 		olmResponse, err := am.apiClient.CreateOlm(userId, deviceName)
 		if err != nil {
