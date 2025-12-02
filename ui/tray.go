@@ -63,34 +63,65 @@ var (
 	menuUpdateMutex    sync.Mutex
 )
 
-func setTrayIcon(connected bool) {
+// updateTrayTooltip updates the tray icon tooltip to show the current tunnel state
+func updateTrayTooltip(state tunnel.State) {
 	if trayIcon == nil {
 		return
 	}
 
-	var iconName string
-	if connected {
-		iconName = "icon-orange.ico"
-	} else {
-		iconName = "icon-gray.ico"
+	stateText := state.DisplayText()
+	tooltipText := fmt.Sprintf("%s: %s", config.AppName, stateText)
+	if err := trayIcon.SetToolTip(tooltipText); err != nil {
+		logger.Error("Failed to set tray tooltip: %v", err)
+	}
+}
+
+// setTrayIconForState sets the tray icon based on tunnel state, with overlay for transitional states
+func setTrayIconForState(state tunnel.State) {
+	if trayIcon == nil {
+		return
 	}
 
-	iconPath := filepath.Join(config.GetIconsPath(), iconName)
-	icon, err := walk.NewIconFromFile(iconPath)
-	if err != nil {
-		logger.Error("Failed to load icon from %s: %v", iconPath, err)
-		// Fallback to system icon
-		icon, err = walk.NewIconFromResourceId(32517) // IDI_INFORMATION
+	// For simple states (stopped/running), use icon directly to avoid conversion artifacts
+	if state == tunnel.StateStopped || state == tunnel.StateRunning {
+		var iconName string
+		if state == tunnel.StateRunning {
+			iconName = "icon-orange.ico"
+		} else {
+			iconName = "icon-gray.ico"
+		}
+		iconPath := filepath.Join(config.GetIconsPath(), iconName)
+		icon, err := walk.NewIconFromFile(iconPath)
 		if err != nil {
-			logger.Error("Failed to load fallback icon: %v", err)
+			logger.Error("Failed to load icon from %s: %v", iconPath, err)
 			return
 		}
-	}
-
-	if icon != nil {
 		if err := trayIcon.SetIcon(icon); err != nil {
 			logger.Error("Failed to set tray icon: %v", err)
 		}
+		return
+	}
+
+	// For transitional states, use icon provider with overlay
+	icon, err := iconWithOverlayForState(state, 16)
+	if err != nil {
+		logger.Error("Failed to create icon for state %s: %v", state.String(), err)
+		// Fallback to gray icon
+		iconPath := filepath.Join(config.GetIconsPath(), "icon-gray.ico")
+		fallbackIcon, err := walk.NewIconFromFile(iconPath)
+		if err != nil {
+			logger.Error("Failed to load fallback icon from %s: %v", iconPath, err)
+			return
+		}
+		if err := trayIcon.SetIcon(fallbackIcon); err != nil {
+			logger.Error("Failed to set tray icon: %v", err)
+		}
+		return
+	}
+
+	// SetIcon accepts walk.Image for composite icons with overlay
+	if err := trayIcon.SetIcon(icon); err != nil {
+		logger.Error("Failed to set tray icon: %v", err)
 	}
 }
 
@@ -932,10 +963,10 @@ func SetupTray(mw *walk.MainWindow, am *auth.AuthManager, cm *config.ConfigManag
 	trayIcon = ni // Store reference for icon updates
 
 	// Load default gray icon (disconnected state)
-	setTrayIcon(false)
+	setTrayIconForState(tunnel.StateStopped)
 
-	// Set tooltip
-	ni.SetToolTip(config.AppName)
+	// Set initial tooltip
+	updateTrayTooltip(tunnel.StateStopped)
 
 	// Initialize context menu
 	contextMenu = ni.ContextMenu()
@@ -1107,18 +1138,24 @@ func SetupTray(mw *walk.MainWindow, am *auth.AuthManager, cm *config.ConfigManag
 		tunnelStateMutex.Unlock()
 
 		walk.App().Synchronize(func() {
+			// Update connection state
 			switch state {
 			case tunnel.StateRunning:
 				connectMutex.Lock()
 				isConnected = true
 				connectMutex.Unlock()
-				setTrayIcon(true)
 			case tunnel.StateStopped:
 				connectMutex.Lock()
 				isConnected = false
 				connectMutex.Unlock()
-				setTrayIcon(false)
 			}
+
+			// Update tray icon for all states (including transitional)
+			setTrayIconForState(state)
+
+			// Update tooltip with current state
+			updateTrayTooltip(state)
+
 			// Update menu to update status text and connect button
 			updateMenu()
 		})
