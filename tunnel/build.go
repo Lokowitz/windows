@@ -24,7 +24,7 @@ func buildTunnel(config Config) error {
 		LogLevel:   configpkg.LogLevel,
 		EnableAPI:  true,
 		SocketPath: OLMNamedPipePath,
-		Version:    "1",
+		Version:    "Pangolin Windows Client",
 		OnConnected: func() {
 			logger.Info("Tunnel: OLM connected")
 		},
