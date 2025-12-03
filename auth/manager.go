@@ -542,35 +542,6 @@ func (am *AuthManager) CheckOrgAccess(orgId string) (bool, error) {
 		if userId != "" {
 			policyResponse, err := am.apiClient.CheckOrgUserAccess(orgId, userId)
 			if err == nil {
-				// Log the policy details
-				var policyDetails []string
-				if policyResponse.Policies != nil {
-					policies := policyResponse.Policies
-					if policies.RequiredTwoFactor != nil {
-						policyDetails = append(policyDetails, fmt.Sprintf("requiredTwoFactor: %v", *policies.RequiredTwoFactor))
-					}
-					if policies.MaxSessionLength != nil {
-						msl := policies.MaxSessionLength
-						policyDetails = append(policyDetails, fmt.Sprintf("maxSessionLength: compliant=%v, maxHours=%d, currentHours=%d", msl.Compliant, msl.MaxSessionLengthHours, msl.SessionAgeHours))
-					}
-					if policies.PasswordAge != nil {
-						pa := policies.PasswordAge
-						policyDetails = append(policyDetails, fmt.Sprintf("passwordAge: compliant=%v, maxDays=%d, currentDays=%d", pa.Compliant, pa.MaxPasswordAgeDays, pa.PasswordAgeDays))
-					}
-				}
-
-				policyLogMessage := "none"
-				if len(policyDetails) > 0 {
-					policyLogMessage = fmt.Sprintf("%v", policyDetails)
-				}
-
-				errorMsg := "none"
-				if policyResponse.Error != nil {
-					errorMsg = *policyResponse.Error
-				}
-
-				logger.Error("Org policy check for org %s: allowed=%v, error=%s, policies=[%s]", orgId, policyResponse.Allowed, errorMsg, policyLogMessage)
-
 				// Check if access is denied and show error message
 				if !policyResponse.Allowed {
 					// Get hostname for the resolution URL
