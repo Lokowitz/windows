@@ -9,8 +9,8 @@ This client can be used with both:
 
 ## Download & Install
 
-- [Pangolin for Windows Installer](https://pangolin.net/downloads) - This is the official page to download the latest installer file for Windows.
-- [Older Versions](https://github.com/fosrl/windows/releases) - The releases section of this repository contains release notes and download artifacts for the latest version and all older versions.
+- Pangolin for Windows Installer - This is the official page to download the latest installer file for Windows.
+- [All Versions](https://github.com/fosrl/windows/releases) - The releases section of this repository contains release notes and download artifacts for the latest version and all older versions.
 
 ## Documentation
 
