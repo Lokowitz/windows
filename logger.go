@@ -18,25 +18,29 @@ import (
 // Returns INFO as default if the string doesn't match any known level
 func stringToLogLevel(levelStr string) logger.LogLevel {
 	switch strings.ToUpper(levelStr) {
-	case "DEBUG":
+	case "debug":
 		return logger.DEBUG
-	case "INFO":
+	case "info":
 		return logger.INFO
-	case "WARN":
+	case "warn":
 		return logger.WARN
-	case "ERROR":
+	case "error":
 		return logger.ERROR
-	case "FATAL":
+	case "fatal":
 		return logger.FATAL
 	default:
-		return logger.INFO // Default to INFO if unknown
+		return logger.DEBUG // Default to INFO if unknown
 	}
 }
 
 // setupLogging initializes the logger and sets up log file output with rotation
 func setupLogging() {
-	// Initialize the logger (GetLogger will auto-initialize if needed)
-	_ = logger.GetLogger()
+	// Initialize the logger and set log level FIRST, before any logging calls
+	logInstance := logger.GetLogger()
+
+	// Set the log level from centralized config immediately
+	logLevel := stringToLogLevel(config.LogLevel)
+	logInstance.SetLevel(logLevel)
 
 	// Create log directory if it doesn't exist
 	logDir := config.GetLogDir()
@@ -62,12 +66,7 @@ func setupLogging() {
 	}
 
 	// Set the custom logger output
-	logInstance := logger.GetLogger()
 	logInstance.SetOutput(file)
-
-	// Set the log level from centralized config
-	logLevel := stringToLogLevel(config.LogLevel)
-	logInstance.SetLevel(logLevel)
 
 	logger.Info("Pangolin logging initialized - log file: %s, log level: %s", logFile, config.LogLevel)
 }

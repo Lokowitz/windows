@@ -229,4 +229,3 @@ func (error Error) Error() string {
 	}
 	return strings.TrimSpace(windows.UTF16ToString(message[:n]))
 }
-

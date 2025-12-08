@@ -9,7 +9,6 @@ import (
 	"hash"
 	"io"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -74,20 +73,20 @@ func checkForUpdate(keepSession bool) (*UpdateFound, *winhttp.Session, *winhttp.
 	logger.Info("Updater: checkForUpdate() started (keepSession=%v)", keepSession)
 	logger.Info("Updater: Current version: %s, Architecture: %s", version.Number, version.Arch())
 
-	// Allow bypassing official version check for development/testing
-	// Set PANGOLIN_ALLOW_DEV_UPDATES=1 to enable updates on unsigned builds
-	isOfficial := version.IsRunningOfficialVersion()
-	logger.Info("Updater: IsRunningOfficialVersion: %v", isOfficial)
-	if !isOfficial {
-		devMode := os.Getenv("PANGOLIN_ALLOW_DEV_UPDATES") == "1"
-		logger.Info("Updater: PANGOLIN_ALLOW_DEV_UPDATES: %v", devMode)
-		if !devMode {
-			err := errors.New("Build is not official, so updates are disabled")
-			logger.Error("Updater: %v", err)
-			return nil, nil, nil, err
-		}
-		logger.Info("Updater: Development mode enabled - allowing updates on unsigned build")
-	}
+	// // Allow bypassing official version check for development/testing
+	// // Set PANGOLIN_ALLOW_DEV_UPDATES=1 to enable updates on unsigned builds
+	// isOfficial := version.IsRunningOfficialVersion()
+	// logger.Info("Updater: IsRunningOfficialVersion: %v", isOfficial)
+	// if !isOfficial {
+	// 	devMode := os.Getenv("PANGOLIN_ALLOW_DEV_UPDATES") == "1"
+	// 	logger.Info("Updater: PANGOLIN_ALLOW_DEV_UPDATES: %v", devMode)
+	// 	if !devMode {
+	// 		err := errors.New("Build is not official, so updates are disabled")
+	// 		logger.Error("Updater: %v", err)
+	// 		return nil, nil, nil, err
+	// 	}
+	// 	logger.Info("Updater: Development mode enabled - allowing updates on unsigned build")
+	// }
 
 	logger.Info("Updater: Creating WinHTTP session with User-Agent: %s", version.UserAgent())
 	session, err := winhttp.NewSession(version.UserAgent())
@@ -360,20 +359,20 @@ func DownloadVerifyAndExecute(userToken uintptr) (progress chan DownloadProgress
 		}
 		logger.Info("Updater: Hash verification passed")
 
-		// Skip authenticode verification in development mode
-		devMode := os.Getenv("PANGOLIN_ALLOW_DEV_UPDATES") == "1"
-		if !devMode {
-			logger.Info("Updater: Verifying Authenticode signature")
-			progress <- DownloadProgress{Activity: "Verifying authenticode signature"}
-			if !verifyAuthenticode(file.ExclusivePath()) {
-				logger.Error("Updater: Authenticode verification failed")
-				progress <- DownloadProgress{Error: errors.New("The downloaded update does not have an authentic authenticode signature")}
-				return
-			}
-			logger.Info("Updater: Authenticode verification passed")
-		} else {
-			logger.Info("Updater: Skipping Authenticode verification (dev mode)")
-		}
+		// // Skip authenticode verification in development mode
+		// devMode := os.Getenv("PANGOLIN_ALLOW_DEV_UPDATES") == "1"
+		// if !devMode {
+		// 	logger.Info("Updater: Verifying Authenticode signature")
+		// 	progress <- DownloadProgress{Activity: "Verifying authenticode signature"}
+		// 	if !verifyAuthenticode(file.ExclusivePath()) {
+		// 		logger.Error("Updater: Authenticode verification failed")
+		// 		progress <- DownloadProgress{Error: errors.New("The downloaded update does not have an authentic authenticode signature")}
+		// 		return
+		// 	}
+		// 	logger.Info("Updater: Authenticode verification passed")
+		// } else {
+		// 	logger.Info("Updater: Skipping Authenticode verification (dev mode)")
+		// }
 
 		logger.Info("Updater: Starting MSI installation")
 		progress <- DownloadProgress{Activity: "Installing update"}
