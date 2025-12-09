@@ -5,6 +5,7 @@ package secrets
 import (
 	"fmt"
 
+	"github.com/fosrl/newt/logger"
 	"github.com/zalando/go-keyring"
 )
 
@@ -27,6 +28,9 @@ func (sm *SecretManager) SaveSecret(key, value string) bool {
 	_ = sm.DeleteSecret(key)
 
 	err := keyring.Set(sm.service, key, value)
+	if err != nil {
+		logger.Error("Failed to save secret for key %s: %v", key, err)
+	}
 	return err == nil
 }
 
