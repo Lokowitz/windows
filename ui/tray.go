@@ -400,7 +400,7 @@ func setupMenu() error {
 	howItWorksAction := walk.NewAction()
 	howItWorksAction.SetText("How Pangolin Works")
 	howItWorksAction.Triggered().Attach(func() {
-		openURL("https://docs.pangolin.net/")
+		openURL("https://docs.pangolin.net/about/how-pangolin-works")
 	})
 	moreMenu.Actions().Add(howItWorksAction)
 
