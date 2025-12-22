@@ -37,11 +37,11 @@ var (
 	loadingAction      *walk.Action
 	statusAction       *walk.Action
 	connectAction      *walk.Action
-	userEmailAction    *walk.Action
 	orgsMenuAction     *walk.Action
 	accountMenuAction  *walk.Action
 	loginAction        *walk.Action
 	logoutAction       *walk.Action
+	addAccountAction   *walk.Action
 	moreAction         *walk.Action
 	quitAction         *walk.Action
 	updateFoundCb      *managers.UpdateFoundCallback
@@ -303,12 +303,6 @@ func setupMenu() error {
 	})
 	actions.Add(connectAction)
 
-	// Create user email action
-	userEmailAction = walk.NewAction()
-	userEmailAction.SetEnabled(false)
-	userEmailAction.SetVisible(false) // Hidden initially
-	actions.Add(userEmailAction)
-
 	var err error
 	// Create organizations menu
 	orgMenu, err = walk.NewMenu()
@@ -339,28 +333,10 @@ func setupMenu() error {
 	loginAction = walk.NewAction()
 	loginAction.SetText("Login to account")
 	loginAction.Triggered().Attach(func() {
-		isAuthenticated := authManager != nil && authManager.IsAuthenticated()
-		loggedOutMutex.RLock()
-		isLoggedOutLocal := isLoggedOut
-		loggedOutMutex.RUnlock()
-
-		if isAuthenticated && !isLoggedOutLocal {
-			// Log in to different account - logout first, then open login window
-			go func() {
-				walk.App().Synchronize(func() {
-					ShowLoginDialog(mainWindow, authManager, configManager, accountManager, apiClient, tunnelManager)
-					// Update menu after dialog closes (login may have succeeded)
-					time.Sleep(100 * time.Millisecond) // Small delay to let auth state update
-					updateMenu()
-				})
-			}()
-		} else {
-			// Log back in or log in to account - just open login window
-			ShowLoginDialog(mainWindow, authManager, configManager, accountManager, apiClient, tunnelManager)
-			// Update menu after dialog closes (login may have succeeded)
-			time.Sleep(100 * time.Millisecond) // Small delay to let auth state update
-			updateMenu()
-		}
+		ShowLoginDialog(mainWindow, authManager, configManager, accountManager, apiClient, tunnelManager)
+		// Update menu after dialog closes (login may have succeeded)
+		time.Sleep(100 * time.Millisecond) // Small delay to let auth state update
+		updateMenu()
 	})
 	actions.Add(loginAction)
 
@@ -373,39 +349,6 @@ func setupMenu() error {
 		logger.Error("Failed to create more menu: %v", err)
 		return err
 	}
-
-	// Create logout action
-	logoutAction = walk.NewAction()
-	logoutAction.SetText("Logout")
-	logoutAction.SetVisible(false) // Hidden initially
-	logoutAction.Triggered().Attach(func() {
-		go func() {
-			// Always stop any running tunnel before logout
-			logger.Info("Stopping tunnel before logout")
-			if err := managers.IPCClientStopTunnel(); err != nil {
-				logger.Error("Failed to stop tunnel before logout: %v", err)
-				// Continue with logout even if stopping tunnel fails
-			}
-
-			if err := authManager.Logout(); err != nil {
-				logger.Error("Failed to logout: %v", err)
-				// Show error dialog to user
-				walk.App().Synchronize(func() {
-					td := walk.NewTaskDialog()
-					_, _ = td.Show(walk.TaskDialogOpts{
-						Owner:         mainWindow,
-						Title:         "Logout Failed",
-						Content:       fmt.Sprintf("Failed to logout: %v", err),
-						IconSystem:    walk.TaskDialogSystemIconError,
-						CommonButtons: win.TDCBF_OK_BUTTON,
-					})
-				})
-			}
-			updateMenu()
-		}()
-	})
-	moreMenu.Actions().Add(logoutAction)
-	moreMenu.Actions().Add(walk.NewSeparatorAction())
 
 	// Support section
 	supportLabel := walk.NewAction()
@@ -670,9 +613,6 @@ func updateMenu() {
 		if updateAction != nil {
 			updateAction.SetVisible(hasUpdateLocal)
 		}
-
-		// Update More submenu
-		updateMoreMenu()
 	})
 }
 
@@ -768,6 +708,13 @@ func updateAccountMenu() {
 	if !hasSeparator {
 		separator := walk.NewSeparatorAction()
 		actions.Insert(1, separator)
+	}
+
+	for accountID, action := range accountActions {
+		if _, ok := accountManager.Accounts[accountID]; !ok {
+			actions.Remove(action)
+			delete(accountActions, accountID)
+		}
 	}
 
 	// Handle "No accounts" message when there are no accounts.
@@ -879,6 +826,60 @@ func updateAccountMenu() {
 		action.SetChecked(currentAccount != nil && account.UserID == currentAccount.UserID)
 		action.SetEnabled(!shouldDisable)
 	}
+
+	if addAccountAction == nil {
+		actions.Add(walk.NewSeparatorAction())
+		addAccountAction = walk.NewAction()
+		addAccountAction.SetText("Add Account")
+		addAccountAction.Triggered().Attach(func() {
+			go func() {
+				walk.App().Synchronize(func() {
+					// Show login dialog
+					ShowLoginDialog(mainWindow, authManager, configManager, accountManager, apiClient, tunnelManager)
+					// Small delay to allow state to update
+					time.Sleep(100 * time.Millisecond)
+					updateMenu()
+				})
+			}()
+		})
+		actions.Add(addAccountAction)
+	}
+	addAccountAction.SetVisible(true)
+
+	// Create logout action
+	if logoutAction == nil {
+		logoutAction = walk.NewAction()
+		logoutAction.SetText("Logout")
+		logoutAction.SetVisible(false) // Initially hidden
+		logoutAction.Triggered().Attach(func() {
+			go func() {
+				// Always stop any running tunnel before logout
+				logger.Info("Stopping tunnel before logout")
+				if err := managers.IPCClientStopTunnel(); err != nil {
+					logger.Error("Failed to stop tunnel before logout: %v", err)
+					// Continue with logout even if stopping tunnel fails
+				}
+
+				if err := authManager.Logout(); err != nil {
+					logger.Error("Failed to logout: %v", err)
+					// Show error dialog to user
+					walk.App().Synchronize(func() {
+						td := walk.NewTaskDialog()
+						_, _ = td.Show(walk.TaskDialogOpts{
+							Owner:         mainWindow,
+							Title:         "Logout Failed",
+							Content:       fmt.Sprintf("Failed to logout: %v", err),
+							IconSystem:    walk.TaskDialogSystemIconError,
+							CommonButtons: win.TDCBF_OK_BUTTON,
+						})
+					})
+				}
+				updateMenu()
+			}()
+		})
+		actions.Add(logoutAction)
+	}
+	logoutAction.SetVisible(currentAccount != nil)
 
 	// Update accounts menu action text
 	accountMenuActionText := "Select Account"
@@ -1079,22 +1080,6 @@ func updateLoginAction() {
 	}
 
 	loginAction.SetVisible(len(accountManager.Accounts) == 0)
-}
-
-// updateMoreMenu updates the More submenu
-func updateMoreMenu() {
-	if moreMenu == nil || logoutAction == nil || authManager == nil {
-		return
-	}
-
-	isAuthenticated := authManager.IsAuthenticated()
-	loggedOutMutex.RLock()
-	isLoggedOutLocal := isLoggedOut
-	loggedOutMutex.RUnlock()
-
-	// Update logout visibility
-	logoutVisible := isAuthenticated && !isLoggedOutLocal
-	logoutAction.SetVisible(logoutVisible)
 }
 
 func SetupTray(

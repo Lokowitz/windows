@@ -250,7 +250,9 @@ func (am *AuthManager) LoginWithDeviceAuth(ctx context.Context, hostnameOverride
 func (am *AuthManager) selectOrgAutomatically() string {
 	var selectedOrgID string
 
+	am.mu.RLock()
 	userID := am.currentUser.UserId
+	am.mu.RUnlock()
 
 	orgsResponse, err := am.apiClient.ListUserOrgs(userID)
 	if err != nil {
@@ -302,9 +304,7 @@ func (am *AuthManager) handleSuccessfulAuth(user *api.User, hostname string, tok
 		user.UserId = user.Id
 	}
 
-	am.mu.Lock()
-	am.currentUser = user
-	am.mu.Unlock()
+	am.UpdateCurrentUser(user)
 
 	selectedOrgID := am.selectOrgAutomatically()
 
@@ -647,8 +647,6 @@ func (am *AuthManager) SwitchAccount(userID string) error {
 		return errors.New("account does not exist")
 	}
 
-	var user *api.User
-
 	token, found := am.secretManager.GetSessionToken(accountToSwitchTo.UserID)
 	if found && token != "" {
 		am.apiClient.UpdateBaseURL(accountToSwitchTo.Hostname)
@@ -656,7 +654,7 @@ func (am *AuthManager) SwitchAccount(userID string) error {
 
 		// Always fetch the latest user info to verify the user exists and update stored info
 		var err error
-		user, err = am.apiClient.GetUser()
+		user, err := am.apiClient.GetUser()
 		if err != nil {
 			// This should never happen, but if it does, silently
 			// fail and switch to an unauthenticated state to prevent
@@ -666,13 +664,15 @@ func (am *AuthManager) SwitchAccount(userID string) error {
 			am.mu.Unlock()
 			return nil
 		}
+
+		am.UpdateCurrentUser(user)
 	} else {
 		return errors.New("session token does not exist for this user")
 	}
 
 	selectedOrgID := am.selectOrgAutomatically()
 
-	err := am.accountManager.SetUserOrganization(user.UserId, selectedOrgID)
+	err := am.accountManager.SetUserOrganization(userID, selectedOrgID)
 	if err != nil {
 		logger.Warn("failed to set user's org ID in accounts store: %v", err)
 	}
