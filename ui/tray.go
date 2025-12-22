@@ -39,6 +39,7 @@ var (
 	connectAction      *walk.Action
 	userEmailAction    *walk.Action
 	orgsMenuAction     *walk.Action
+	accountMenuAction  *walk.Action
 	loginAction        *walk.Action
 	logoutAction       *walk.Action
 	moreAction         *walk.Action
@@ -54,12 +55,16 @@ var (
 	tunnelStateMutex   sync.RWMutex
 	authManager        *auth.AuthManager
 	configManager      *config.ConfigManager
+	accountManager     *config.AccountManager
 	apiClient          *api.APIClient
 	tunnelManager      *tunnel.Manager
 	orgMenu            *walk.Menu
+	accountMenu        *walk.Menu
 	moreMenu           *walk.Menu
 	orgActions         map[string]*walk.Action
+	accountActions     map[string]*walk.Action
 	noOrgsAction       *walk.Action
+	noAccountsAction   *walk.Action
 	menuUpdateMutex    sync.Mutex
 )
 
@@ -304,8 +309,8 @@ func setupMenu() error {
 	userEmailAction.SetVisible(false) // Hidden initially
 	actions.Add(userEmailAction)
 
-	// Create organizations menu
 	var err error
+	// Create organizations menu
 	orgMenu, err = walk.NewMenu()
 	if err != nil {
 		logger.Error("Failed to create org menu: %v", err)
@@ -316,12 +321,23 @@ func setupMenu() error {
 	orgsMenuAction.SetVisible(false) // Hidden initially
 	actions.Add(orgsMenuAction)
 
+	// Create account selector menu
+	accountMenu, err = walk.NewMenu()
+	if err != nil {
+		logger.Error("Failed to create org menu: %v", err)
+		return err
+	}
+	accountMenuAction = walk.NewMenuAction(accountMenu)
+	accountMenuAction.SetText("Accounts")
+	accountMenuAction.SetVisible(false) // Hidden initially
+	actions.Add(accountMenuAction)
+
 	// Separator before login
 	actions.Add(walk.NewSeparatorAction())
 
-	// Create login action
+	// Create login action (only when no accounts are available)
 	loginAction = walk.NewAction()
-	loginAction.SetText("Log in to account")
+	loginAction.SetText("Login to account")
 	loginAction.Triggered().Attach(func() {
 		isAuthenticated := authManager != nil && authManager.IsAuthenticated()
 		loggedOutMutex.RLock()
@@ -332,7 +348,7 @@ func setupMenu() error {
 			// Log in to different account - logout first, then open login window
 			go func() {
 				walk.App().Synchronize(func() {
-					ShowLoginDialog(mainWindow, authManager, configManager, apiClient, tunnelManager)
+					ShowLoginDialog(mainWindow, authManager, configManager, accountManager, apiClient, tunnelManager)
 					// Update menu after dialog closes (login may have succeeded)
 					time.Sleep(100 * time.Millisecond) // Small delay to let auth state update
 					updateMenu()
@@ -340,7 +356,7 @@ func setupMenu() error {
 			}()
 		} else {
 			// Log back in or log in to account - just open login window
-			ShowLoginDialog(mainWindow, authManager, configManager, apiClient, tunnelManager)
+			ShowLoginDialog(mainWindow, authManager, configManager, accountManager, apiClient, tunnelManager)
 			// Update menu after dialog closes (login may have succeeded)
 			time.Sleep(100 * time.Millisecond) // Small delay to let auth state update
 			updateMenu()
@@ -567,6 +583,7 @@ func setupMenu() error {
 
 	// Initialize org actions map
 	orgActions = make(map[string]*walk.Action)
+	accountActions = make(map[string]*walk.Action)
 
 	// Initial update to set correct visibility and text
 	updateMenu()
@@ -610,9 +627,10 @@ func updateMenu() {
 				hasLocalUserInfo = true
 			}
 		}
-		if !hasLocalUserInfo && configManager != nil {
-			cfg := configManager.GetConfig()
-			if cfg != nil && cfg.Email != nil && *cfg.Email != "" {
+
+		if !hasLocalUserInfo && accountManager != nil {
+			activeAccount, _ := accountManager.ActiveAccount()
+			if activeAccount != nil {
 				hasLocalUserInfo = true
 			}
 		}
@@ -625,17 +643,12 @@ func updateMenu() {
 		// Update authenticated section visibility
 		// Show full auth section if: authenticated and not logged out
 		showAuthSection := isAuthenticated && !isLoggedOutLocal && !isInitializing
-		// Show user email if: full auth section OR (logged out but has local user info)
-		showUserEmail := showAuthSection || (isLoggedOutLocal && hasLocalUserInfo && !isInitializing)
 
 		if statusAction != nil {
 			statusAction.SetVisible(showAuthSection)
 		}
 		if connectAction != nil {
 			connectAction.SetVisible(showAuthSection)
-		}
-		if userEmailAction != nil {
-			userEmailAction.SetVisible(showUserEmail)
 		}
 		if orgsMenuAction != nil {
 			orgsMenuAction.SetVisible(showAuthSection)
@@ -646,12 +659,8 @@ func updateMenu() {
 			updateTunnelState()
 			updateOrganizations()
 		}
-		// Update user email when authenticated or logged out with local user info
-		if showUserEmail {
-			updateUserEmail()
-		}
 
-		// Update login action
+		updateAccountMenu()
 		updateLoginAction()
 
 		// Update update action visibility
@@ -711,29 +720,177 @@ func updateTunnelState() {
 	connectAction.SetChecked(state == tunnel.StateRunning || connected)
 }
 
-// updateUserEmail updates the user email display
-func updateUserEmail() {
-	if userEmailAction == nil || authManager == nil {
+func updateAccountMenu() {
+	if accountMenu == nil || accountMenuAction == nil || accountManager == nil {
 		return
 	}
 
-	loggedOutMutex.RLock()
-	isLoggedOutLocal := isLoggedOut
-	loggedOutMutex.RUnlock()
+	accounts := accountManager.Accounts
+	currentAccount, _ := accountManager.ActiveAccount()
 
-	user := authManager.CurrentUser()
-	emailText := ""
-	if user != nil && user.Email != "" {
-		emailText = user.Email
-		// Append "(Logged out)" if logged out
-		if isLoggedOutLocal {
-			emailText += " (Logged out)"
-		}
-	} else if cfg := configManager.GetConfig(); cfg != nil && cfg.Email != nil {
-		emailText = *cfg.Email + " (Logged out)"
+	var state tunnel.State
+	if tunnelManager != nil {
+		state = tunnelManager.State()
+	} else {
+		tunnelStateMutex.RLock()
+		state = tunnel.State(currentTunnelState)
+		tunnelStateMutex.RUnlock()
 	}
-	userEmailAction.SetText(emailText)
-	userEmailAction.SetVisible(emailText != "")
+	shouldDisable := state == tunnel.StateStarting || state == tunnel.StateRegistering || state == tunnel.StateRegistered || state == tunnel.StateStopping
+
+	actions := accountMenu.Actions()
+	hasMenuTitle := false
+	hasSeparator := false
+	if actions.Len() > 0 {
+		firstAction := actions.At(0)
+		if firstAction.Text() != "" && !firstAction.Enabled() {
+			hasMenuTitle = true
+		}
+	}
+	if actions.Len() > 1 {
+		secondAction := actions.At(1)
+		if secondAction.Text() == "" {
+			hasSeparator = true
+		}
+	}
+
+	var accountSubmenuTitleAction *walk.Action
+	if !hasMenuTitle {
+		accountSubmenuTitleAction = walk.NewAction()
+		accountSubmenuTitleAction.SetEnabled(false)
+		accountSubmenuTitleAction.SetText("Available Accounts")
+		accountSubmenuTitleAction.SetVisible(true)
+		actions.Insert(0, accountSubmenuTitleAction)
+	} else {
+		accountSubmenuTitleAction = actions.At(0)
+	}
+
+	if !hasSeparator {
+		separator := walk.NewSeparatorAction()
+		actions.Insert(1, separator)
+	}
+
+	// Handle "No accounts" message when there are no accounts.
+	// This should not be reachable, but in case this does happen,
+	// it's handled here.
+	if len(accounts) == 0 {
+		// Add "No organizations" action if it doesn't exist
+		if noAccountsAction == nil {
+			noAccountsAction = walk.NewAction()
+			noAccountsAction.SetText("No accounts")
+			noAccountsAction.SetEnabled(false)
+			// Insert after separator (index 2: count label at 0, separator at 1)
+			actions.Insert(2, noAccountsAction)
+		}
+		noAccountsAction.SetVisible(true)
+	} else {
+		// Remove "No accounts" action if it exists
+		if noAccountsAction != nil {
+			actions.Remove(noAccountsAction)
+			noAccountsAction = nil
+		}
+	}
+
+	// Figure out whether to display the hostname
+	// for a particular account email by if there
+	// are more than 1 accounts with the same email.
+	emailCounts := map[string]int{}
+	for _, account := range accounts {
+		emailCounts[account.Email]++
+	}
+
+	// Update or add orgs
+	for _, account := range accounts {
+		action, exists := accountActions[account.UserID]
+		if !exists {
+			// Create new action
+			action = walk.NewAction()
+
+			var accountText string
+			if emailCounts[account.Email] > 1 {
+				accountText = fmt.Sprintf("%s (%s)", account.Email, account.Hostname)
+			} else {
+				accountText = account.Email
+			}
+
+			action.SetText(accountText)
+			action.SetCheckable(true)
+
+			action.Triggered().Attach(func() {
+				go func() {
+					account := account
+
+					// Shut down tunnel here. Switching users requires the tunnel must go
+					// down.
+					logger.Info("Stopping tunnel before switching accounts")
+					if err := managers.IPCClientStopTunnel(); err != nil {
+						logger.Error("Failed to shut down tunnel before switch: %v", err)
+						walk.App().Synchronize(func() {
+							td := walk.NewTaskDialog()
+							_, _ = td.Show(walk.TaskDialogOpts{
+								Owner:         mainWindow,
+								Title:         "Tunnel Shutdown Failed",
+								Content:       fmt.Sprintf("Failed to shut down tunnel before switching accounts: %v", err),
+								IconSystem:    walk.TaskDialogSystemIconError,
+								CommonButtons: win.TDCBF_OK_BUTTON,
+							})
+						})
+						updateMenu()
+						return
+					}
+
+					// After shutting down the tunnel, switch accounts in the auth manager.
+					if err := authManager.SwitchAccount(account.UserID); err != nil {
+						logger.Error("Failed to select organization: %v", err)
+						// Show error dialog to user
+						walk.App().Synchronize(func() {
+							td := walk.NewTaskDialog()
+							_, _ = td.Show(walk.TaskDialogOpts{
+								Owner:         mainWindow,
+								Title:         "Switching Account Failed",
+								Content:       fmt.Sprintf("Failed to switch account: %v", err),
+								IconSystem:    walk.TaskDialogSystemIconError,
+								CommonButtons: win.TDCBF_OK_BUTTON,
+							})
+						})
+						updateMenu()
+						return
+					}
+
+					updateMenu()
+				}()
+			})
+			accountActions[account.UserID] = action
+
+			// Insert after separator (index 2: count label at 0, separator at 1)
+			actions.Insert(2, action)
+		} else {
+			// Update existing action
+			var accountText string
+			if emailCounts[account.Email] > 1 {
+				accountText = fmt.Sprintf("%s (%s)", account.Email, account.Hostname)
+			} else {
+				accountText = account.Email
+			}
+			action.SetText(accountText)
+		}
+
+		// Update checked state
+		action.SetChecked(currentAccount != nil && account.UserID == currentAccount.UserID)
+		action.SetEnabled(!shouldDisable)
+	}
+
+	// Update accounts menu action text
+	accountMenuActionText := "Select Account"
+	if currentAccount != nil {
+		if emailCounts[currentAccount.Email] > 1 {
+			accountMenuActionText = fmt.Sprintf("%s (%s)", currentAccount.Email, currentAccount.Hostname)
+		} else {
+			accountMenuActionText = currentAccount.Email
+		}
+	}
+	accountMenuAction.SetText(accountMenuActionText)
+	accountMenuAction.SetVisible(len(accounts) > 0)
 }
 
 // updateOrganizations updates the organizations menu
@@ -840,10 +997,11 @@ func updateOrganizations() {
 			action = walk.NewAction()
 			action.SetText(org.Name)
 			action.SetCheckable(true)
-			orgCopy := org // Capture for closure
 			action.Triggered().Attach(func() {
+				org := org
+
 				go func() {
-					if err := authManager.SelectOrganization(&orgCopy); err != nil {
+					if err := authManager.SelectOrganization(&org); err != nil {
 						logger.Error("Failed to select organization: %v", err)
 						// Show error dialog to user
 						walk.App().Synchronize(func() {
@@ -860,7 +1018,7 @@ func updateOrganizations() {
 						updateMenu()
 
 						if tunnelManager.IsConnected() {
-							if err := tunnelManager.SwitchOLMOrg(orgCopy.Id); err != nil {
+							if err := tunnelManager.SwitchOLMOrg(org.Id); err != nil {
 								logger.Error("Failed to switch tunnel organization: %v", err)
 								// Show error dialog to user
 								walk.App().Synchronize(func() {
@@ -903,29 +1061,24 @@ func updateOrganizations() {
 
 // updateLoginAction updates the login button text and enabled state
 func updateLoginAction() {
-	if loginAction == nil || authManager == nil {
+	if loginAction == nil || authManager == nil || accountManager == nil {
 		return
 	}
 
 	isAuthenticated := authManager.IsAuthenticated()
-	loggedOutMutex.RLock()
-	isLoggedOutLocal := isLoggedOut
-	loggedOutMutex.RUnlock()
-
-	cfg := configManager.GetConfig()
-	hasSavedUserInfo := cfg != nil && cfg.Email != nil
 
 	if isAuthenticated {
-		if isLoggedOutLocal {
-			loginAction.SetText("Log back in")
+		activeAccount, _ := accountManager.ActiveAccount()
+		if activeAccount != nil {
+			loginAction.SetText(activeAccount.Email)
 		} else {
-			loginAction.SetText("Log in to different account")
+			loginAction.SetText("Select Account")
 		}
-	} else if hasSavedUserInfo {
-		loginAction.SetText("Log back in")
 	} else {
-		loginAction.SetText("Log in to account")
+		loginAction.SetText("Login to Account")
 	}
+
+	loginAction.SetVisible(len(accountManager.Accounts) == 0)
 }
 
 // updateMoreMenu updates the More submenu
@@ -944,16 +1097,24 @@ func updateMoreMenu() {
 	logoutAction.SetVisible(logoutVisible)
 }
 
-func SetupTray(mw *walk.MainWindow, am *auth.AuthManager, cm *config.ConfigManager, ac *api.APIClient, sm *secrets.SecretManager) error {
+func SetupTray(
+	mw *walk.MainWindow,
+	am *auth.AuthManager,
+	cm *config.ConfigManager,
+	accm *config.AccountManager,
+	ac *api.APIClient,
+	sm *secrets.SecretManager,
+) error {
 	// Store references for update menu management
 	mainWindow = mw
 	authManager = am
 	configManager = cm
 	apiClient = ac
+	accountManager = accm
 
 	// Initialize tunnel manager with IPC adapter
 	ipcAdapter := managers.NewIPCAdapter()
-	tunnelManager = tunnel.NewManager(am, cm, sm, ipcAdapter)
+	tunnelManager = tunnel.NewManager(am, cm, accm, sm, ipcAdapter)
 
 	// Create NotifyIcon
 	ni, err := walk.NewNotifyIcon()
