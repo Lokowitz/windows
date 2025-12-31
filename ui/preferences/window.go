@@ -114,7 +114,7 @@ func NewPreferencesWindow(owner walk.Form, tm *tunnel.Manager, cm *config.Config
 	}
 
 	// Create and add tabs
-	// Order: Preferences, Logs, OLM Status
+	// Order: Preferences, Status, Logs, About
 	prefsTab := NewPreferencesTab(cm)
 	if tabPage, err := prefsTab.Create(pw.tabWidget); err != nil {
 		return nil, fmt.Errorf("failed to create preferences tab: %w", err)
@@ -123,6 +123,15 @@ func NewPreferencesWindow(owner walk.Form, tm *tunnel.Manager, cm *config.Config
 		pw.tabWidget.Pages().Add(tabPage)
 		prefsTab.AfterAdd()
 		pw.tabs = append(pw.tabs, prefsTab)
+	}
+
+	olmTab := NewOLMStatusTab(tm)
+	if tabPage, err := olmTab.Create(pw.tabWidget); err != nil {
+		return nil, fmt.Errorf("failed to create OLM status tab: %w", err)
+	} else {
+		pw.tabWidget.Pages().Add(tabPage)
+		olmTab.AfterAdd()
+		pw.tabs = append(pw.tabs, olmTab)
 	}
 
 	logsTab := NewLogsTab()
@@ -135,13 +144,13 @@ func NewPreferencesWindow(owner walk.Form, tm *tunnel.Manager, cm *config.Config
 		pw.tabs = append(pw.tabs, logsTab)
 	}
 
-	olmTab := NewOLMStatusTab(tm)
-	if tabPage, err := olmTab.Create(pw.tabWidget); err != nil {
-		return nil, fmt.Errorf("failed to create OLM status tab: %w", err)
+	aboutTab := NewAboutTab()
+	if tabPage, err := aboutTab.Create(pw.tabWidget); err != nil {
+		return nil, fmt.Errorf("failed to create about tab: %w", err)
 	} else {
 		pw.tabWidget.Pages().Add(tabPage)
-		olmTab.AfterAdd()
-		pw.tabs = append(pw.tabs, olmTab)
+		aboutTab.AfterAdd()
+		pw.tabs = append(pw.tabs, aboutTab)
 	}
 
 	disposables.Spare()
