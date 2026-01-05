@@ -3,7 +3,8 @@ module github.com/fosrl/windows
 go 1.25
 
 require (
-	github.com/fosrl/newt v0.0.0
+	github.com/Microsoft/go-winio v0.6.2
+	github.com/fosrl/newt v1.8.0
 	github.com/fosrl/olm v0.0.0
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
 	github.com/tailscale/walk v0.0.0-20251016200523-963e260a8227
@@ -15,7 +16,6 @@ require (
 
 require (
 	al.essio.dev/pkg/shellescape v1.5.1 // indirect
-	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/danieljoos/wincred v1.2.2 // indirect
 	github.com/dblohm7/wingoes v0.0.0-20231019175336-f6e33aa7cc34 // indirect
 	github.com/godbus/dbus/v5 v5.2.0 // indirect
