@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/fosrl/windows/version"
 )
 
 // Login authenticates a user with email and password
@@ -264,7 +266,7 @@ func (c *APIClient) TestConnection() (bool, error) {
 		return false, &APIError{Type: ErrorTypeInvalidURL, Err: err}
 	}
 
-	req.Header.Set("User-Agent", c.agentName)
+	req.Header.Set("User-Agent", version.UserAgent())
 
 	resp, err := testClient.Do(req)
 	if err != nil {
