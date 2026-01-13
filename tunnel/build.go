@@ -45,6 +45,9 @@ func (s *tunnelService) buildTunnel(config Config) error {
 		return err
 	}
 
+	initialFingerprint := GatherFingerprintInfo().ToMap()
+	initialPostures := GatherPostureChecks().ToMap()
+
 	olmConfig := olmpkg.TunnelConfig{
 		Endpoint:             config.Endpoint,
 		ID:                   config.ID,
@@ -60,7 +63,29 @@ func (s *tunnelService) buildTunnel(config Config) error {
 		UpstreamDNS:          config.UpstreamDNS,
 		OverrideDNS:          config.OverrideDNS,
 		TunnelDNS:            config.TunnelDNS,
+		InitialFingerprint:   initialFingerprint,
+		InitialPostures:      initialPostures,
 	}
+
+	s.fingerprintCtx, s.fingerprintCancel = context.WithCancel(context.Background())
+
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-s.fingerprintCtx.Done():
+				return
+			case <-ticker.C:
+				fp := GatherFingerprintInfo().ToMap()
+				postures := GatherPostureChecks().ToMap()
+
+				s.olm.SetFingerprint(fp)
+				s.olm.SetPostures(postures)
+			}
+		}
+	}()
 
 	s.olm.StartApi()
 

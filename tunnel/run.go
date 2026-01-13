@@ -3,6 +3,7 @@
 package tunnel
 
 import (
+	"context"
 	"time"
 
 	"github.com/fosrl/newt/logger"
@@ -24,6 +25,9 @@ type tunnelService struct {
 	configJSON string
 
 	olm *olm.Olm
+
+	fingerprintCtx    context.Context
+	fingerprintCancel context.CancelFunc
 }
 
 func (s *tunnelService) Execute(args []string, r <-chan svc.ChangeRequest, changes chan<- svc.Status) (svcSpecificEC bool, exitCode uint32) {
