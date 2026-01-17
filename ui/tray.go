@@ -1305,6 +1305,25 @@ func SetupTray(
 		})
 	})
 
+	// Register for tunnel error notifications via tunnel manager
+	tunnelManager.RegisterErrorCallback(func(err *tunnel.OLMStatusError) {
+		logger.Error("Tunnel error detected: code=%s, message=%s", err.Code, err.Message)
+		walk.App().Synchronize(func() {
+			td := walk.NewTaskDialog()
+			errorMessage := err.Message
+			if errorMessage == "" {
+				errorMessage = fmt.Sprintf("Error code: %s", err.Code)
+			}
+			_, _ = td.Show(walk.TaskDialogOpts{
+				Owner:         mainWindow,
+				Title:         "Connection Error",
+				Content:       errorMessage,
+				IconSystem:    walk.TaskDialogSystemIconError,
+				CommonButtons: win.TDCBF_OK_BUTTON,
+			})
+		})
+	})
+
 	// Monitor auth state changes to rebuild menu
 	go func() {
 		// Initial state

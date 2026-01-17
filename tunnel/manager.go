@@ -36,6 +36,7 @@ type Manager struct {
 	currentState   State
 	isConnected    bool
 	stateCallback  func(State)
+	errorCallback  func(*OLMStatusError)
 	unregisterCb   func()
 	ipcClient      IPCClient
 	authManager    *auth.AuthManager
@@ -128,6 +129,13 @@ func (tm *Manager) RegisterStateChangeCallback(cb func(State)) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	tm.stateCallback = cb
+}
+
+// RegisterErrorCallback registers a callback that will be called when an error is detected in OLM status
+func (tm *Manager) RegisterErrorCallback(cb func(*OLMStatusError)) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.errorCallback = cb
 }
 
 // buildConfig builds the tunnel configuration from auth manager, config manager, and secret manager
@@ -250,25 +258,6 @@ func (tm *Manager) Connect() error {
 		)
 	}
 
-	// Check org access before connecting
-	hasAccess, err := tm.authManager.CheckOrgAccess(currentOrg.Id)
-	if err != nil {
-		logger.Error("Failed to check org access: %v", err)
-		return formatConnectionError(
-			"Access Check Failed",
-			fmt.Sprintf("Failed to verify access to the organization: %v", err),
-			err,
-		)
-	}
-	if !hasAccess {
-		logger.Error("Access denied for org %s, aborting connection", currentOrg.Id)
-		return formatConnectionError(
-			"Access Denied",
-			"You do not have access to the selected organization.",
-			nil,
-		)
-	}
-
 	// Ensure OLM credentials exist before connecting
 	currentUser := tm.authManager.CurrentUser()
 	if currentUser != nil && currentUser.UserId != "" {
@@ -298,47 +287,6 @@ func (tm *Manager) Connect() error {
 				fmt.Sprintf("Failed to set up device credentials: %v", err),
 				err,
 			)
-		}
-	}
-
-	// Check if OLM is blocked before connecting
-	currentUser = tm.authManager.CurrentUser()
-	var userId string
-	if currentUser != nil && currentUser.UserId != "" {
-		userId = currentUser.UserId
-	} else {
-		activeAccount, err := tm.accountManager.ActiveAccount()
-		if err != nil {
-			logger.Error("Failed to get active account for blocked check: %v", err)
-		} else {
-			userId = activeAccount.UserID
-		}
-	}
-
-	if userId != "" {
-		olmId, found := tm.secretManager.GetOlmId(userId)
-		if found && olmId != "" {
-			// Get orgId if available
-			var orgId *string
-			if currentOrg := tm.authManager.CurrentOrg(); currentOrg != nil {
-				orgId = &currentOrg.Id
-			}
-
-			// Check if OLM is blocked
-			olm, err := tm.authManager.APIClient().GetUserOlm(userId, olmId, orgId)
-			if err != nil {
-				// If check fails (network error, etc.), log but allow connection attempt
-				// The server will reject if truly blocked
-				logger.Error("Failed to check OLM blocked status: %v", err)
-			} else if olm != nil && olm.Blocked != nil && *olm.Blocked {
-				// User is blocked - prevent connection
-				logger.Error("Account is blocked, preventing connection")
-				return formatConnectionError(
-					"Account Blocked",
-					"Your device is blocked in this organization. Contact your admin for more information.",
-					nil,
-				)
-			}
 		}
 	}
 
@@ -417,6 +365,12 @@ func (tm *Manager) Disconnect() error {
 	return nil
 }
 
+// OLMStatusError represents an error in the OLM status response
+type OLMStatusError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
 // OLMStatusResponse represents the status response from OLM API
 type OLMStatusResponse struct {
 	Connected       bool                   `json:"connected"`
@@ -427,6 +381,7 @@ type OLMStatusResponse struct {
 	OrgID           string                 `json:"orgId,omitempty"`
 	PeerStatuses    map[int]*OLMPeerStatus `json:"peers,omitempty"`
 	NetworkSettings map[string]interface{} `json:"networkSettings,omitempty"`
+	Error           *OLMStatusError        `json:"error,omitempty"`
 }
 
 // OLMPeerStatus represents the status of a peer connection
@@ -596,6 +551,31 @@ func (tm *Manager) StartStatusPolling() {
 				if err != nil {
 					logger.Error("Failed to poll OLM status: %v", err)
 					continue
+				}
+
+				// This should be checked before checking termination or state updates
+				if status.Error != nil {
+					// Get current state to verify we're still in registration phase
+					tm.mu.RLock()
+					currentState := tm.currentState
+					tm.mu.RUnlock()
+
+					// Only handle errors during registration phase (not yet fully connected)
+					if currentState != StateRunning {
+						logger.Error("OLM status indicates error during registration: code=%s, message=%s", status.Error.Code, status.Error.Message)
+						// Stop the tunnel immediately
+						if err := tm.Disconnect(); err != nil {
+							logger.Error("Failed to disconnect tunnel after error: %v", err)
+						}
+						// Notify UI of the error
+						tm.mu.Lock()
+						errorCb := tm.errorCallback
+						tm.mu.Unlock()
+						if errorCb != nil {
+							errorCb(status.Error)
+						}
+						continue
+					}
 				}
 
 				// If terminated, disconnect the tunnel
